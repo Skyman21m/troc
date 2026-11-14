@@ -104,6 +104,23 @@ void main() {
   Finder row(String label) =>
       find.descendant(of: sheet, matching: find.text(label));
 
+  /// The row of the open sheet of [option], whatever its label shows besides it (a payment method's number of orders).
+  Finder optionRow(Object option) =>
+      find.descendant(of: sheet, matching: find.byKey(ValueKey(option)));
+
+  /// The top of the row of [option] in the open sheet.
+  double topOf(WidgetTester tester, Object option) =>
+      tester.getRect(optionRow(option)).top;
+
+  /// Types [text] in the search field of the open sheet.
+  Future<void> typeSearch(WidgetTester tester, String text) async {
+    await tester.enterText(
+      find.descendant(of: sheet, matching: find.byType(TextField)),
+      text,
+    );
+    await settle(tester);
+  }
+
   /// Scrolls [target] into view, then taps it.
   Future<void> tapShown(WidgetTester tester, Finder target) async {
     await tester.ensureVisible(target);
@@ -114,31 +131,39 @@ void main() {
 
   /// Scrolls the open sheet until the row [label] is built and shown, then taps it: the list builds only the rows near the screen.
   /// [step] is the scroll of each try, negative for a row above the ones shown.
+  /// [target] finds the row instead of its label, such as [optionRow].
   Future<void> pickRow(
     WidgetTester tester,
     String label, {
     double step = 100,
+    Finder? target,
   }) async {
-    if (row(label).evaluate().isEmpty) {
+    final found = target ?? row(label);
+    if (found.evaluate().isEmpty) {
       await tester.scrollUntilVisible(
-        row(label),
+        found,
         step,
-        scrollable: find.descendant(
-          of: sheet,
-          matching: find.byType(Scrollable),
-        ),
+        scrollable: find
+            .descendant(of: sheet, matching: find.byType(Scrollable))
+            .first,
       );
     }
-    await tester.ensureVisible(row(label));
+    await tester.ensureVisible(found);
     await settle(tester);
-    await tester.tap(row(label));
+    await tester.tap(found);
     await settle(tester);
   }
 
   /// Closes the open sheet by its button, or, when its title has scrolled away with the button, by a tap above it.
   Future<void> closeSheet(WidgetTester tester) async {
+    // The close button, the one with a tooltip: the search field's button that empties it has the same icon.
     final button = find
-        .descendant(of: sheet, matching: find.byIcon(Icons.close))
+        .descendant(
+          of: sheet,
+          matching: find.byWidgetPredicate(
+            (widget) => widget is IconButton && widget.tooltip != null,
+          ),
+        )
         .hitTestable();
     if (button.evaluate().isNotEmpty) {
       await tester.tap(button);
@@ -338,14 +363,11 @@ void main() {
     await tester.tap(choice('Any payment method'));
     await settle(tester);
     expect(find.text('Select Payment Method'), findsOneWidget);
-    // The list is the official client's fixed one, in its order: it starts with a method no order of the book has.
-    expect(row('Advcash'), findsOneWidget);
-    // Far down the list: larger steps than the default.
-    await pickRow(tester, 'Wise', step: 300);
-    await pickRow(tester, 'Zelle');
+    await pickRow(tester, '', target: optionRow('Wise'));
+    await pickRow(tester, '', target: optionRow('Zelle'));
     expect(listed(tester), [2, 3]);
     // The rule of the official client: « Instant SEPA » keeps every order whose text contains it.
-    await pickRow(tester, 'Instant SEPA', step: -300);
+    await pickRow(tester, '', target: optionRow('Instant SEPA'));
     expect(listed(tester), [1, 2, 3, 5]);
     await closeSheet(tester);
 
@@ -355,7 +377,7 @@ void main() {
       findsOneWidget,
     );
 
-    // The list does not shrink to the methods of the orders the other choices keep: with a currency no order has, every method is still offered, the ones chosen and the others.
+    // With a currency no order has, every method is still offered, the ones chosen and the others.
     await tester.tap(choice('Any currency'));
     await settle(tester);
     await tester.tap(row('CHF'));
@@ -364,11 +386,240 @@ void main() {
     expect(listed(tester), isEmpty);
     await tester.tap(choice('Wise +2'));
     await settle(tester);
-    expect(row('Advcash'), findsOneWidget);
-    await pickRow(tester, 'Revolut', step: 300);
+    expect(optionRow('Advcash'), findsOneWidget);
+    await pickRow(tester, '', step: 300, target: optionRow('Venmo'));
     await closeSheet(tester);
     expect(choice('Wise +3'), findsOneWidget);
     semantics.dispose();
+  });
+
+  group('the payment method sheet (#118)', () {
+    /// The methods of the open sheet, in the order it lists them, as far as its rows are built.
+    List<String> listedMethods(WidgetTester tester) {
+      final rows = [
+        for (final element
+            in find
+                .descendant(
+                  of: sheet,
+                  matching: find.byWidgetPredicate(
+                    (widget) => widget.key is ValueKey<String>,
+                  ),
+                )
+                .evaluate())
+          element,
+      ];
+      rows.sort(
+        (a, b) => tester
+            .getTopLeft(find.byWidget(a.widget))
+            .dy
+            .compareTo(tester.getTopLeft(find.byWidget(b.widget)).dy),
+      );
+      return [
+        for (final element in rows)
+          (element.widget.key as ValueKey<String>).value,
+      ];
+    }
+
+    testWidgets(
+      'the methods of the book first, the most orders first, then the others dimmed under a heading',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        await open(tester);
+        await tester.tap(choice('Any payment method'));
+        await settle(tester);
+
+        // Revolut 3 orders, Instant SEPA 2, then Bizum, Wise and Zelle 1 each in the official list's order; then the others from Advcash, in that order.
+        expect(listedMethods(tester).take(7), [
+          'Revolut',
+          'Instant SEPA',
+          'Bizum',
+          'Wise',
+          'Zelle',
+          'Advcash',
+          'Airtel Money',
+        ]);
+        expect(row('Revolut · 3 orders'), findsOneWidget);
+        expect(row('Instant SEPA · 2 orders'), findsOneWidget);
+        expect(row('Wise · 1 order'), findsOneWidget);
+        expect(row('Advcash'), findsOneWidget);
+        final heading = row('No orders right now');
+        expect(
+          tester.getRect(heading).top,
+          greaterThan(topOf(tester, 'Zelle')),
+        );
+        expect(tester.getRect(heading).top, lessThan(topOf(tester, 'Advcash')));
+        expect(
+          tester.getSemantics(heading),
+          isSemantics(label: 'No orders right now', isHeader: true),
+        );
+        expect(
+          tester.getSemantics(optionRow('Revolut')),
+          isSemantics(
+            label: 'Revolut, 3 orders',
+            isChecked: false,
+            hasTapAction: true,
+          ),
+        );
+        // Dimmed but selectable: a screen reader hears no disabled row.
+        expect(
+          tester.getSemantics(optionRow('Advcash')),
+          isSemantics(
+            label: 'Advcash',
+            isChecked: false,
+            hasTapAction: true,
+            hasEnabledState: false,
+          ),
+        );
+        final advcash = tester.widget<Text>(row('Advcash'));
+        final wise = tester.widget<Text>(row('Wise · 1 order'));
+        expect(advcash.style?.color, isNot(wise.style?.color));
+
+        // The rows keep their places while the user ticks, the dimmed one too.
+        final before = {
+          for (final method in ['Revolut', 'Wise', 'Advcash'])
+            method: topOf(tester, method),
+        };
+        await tester.tap(optionRow('Wise'));
+        await settle(tester);
+        await tester.tap(optionRow('Advcash'));
+        await settle(tester);
+        for (final MapEntry(key: method, value: top) in before.entries) {
+          expect(topOf(tester, method), top, reason: method);
+        }
+        expect(
+          tester.getSemantics(optionRow('Advcash')),
+          isSemantics(label: 'Advcash', isChecked: true),
+        );
+        // No order has Advcash: with Wise or Advcash, Wise's order alone.
+        expect(listed(tester), [2]);
+        await closeSheet(tester);
+        expect(choice('Wise +1'), findsOneWidget);
+
+        // Reopened: the chosen methods first, in the order chosen, in view, each with its count.
+        await tester.tap(choice('Wise +1'));
+        await settle(tester);
+        expect(listedMethods(tester).take(4), [
+          'Wise',
+          'Advcash',
+          'Revolut',
+          'Instant SEPA',
+        ]);
+        expect(row('Wise · 1 order').hitTestable(), findsOneWidget);
+        expect(row('Advcash · no orders').hitTestable(), findsOneWidget);
+        expect(
+          tester.getSemantics(optionRow('Advcash')),
+          isSemantics(label: 'Advcash, no orders', isChecked: true),
+        );
+        expect(
+          tester.getRect(row('Any payment method')).top,
+          lessThan(topOf(tester, 'Wise')),
+        );
+
+        // « Any payment method » clears every choice.
+        await tester.tap(row('Any payment method'));
+        await settle(tester);
+        expect(listed(tester), [1, 2, 3, 4, 5, 6, 7]);
+        await closeSheet(tester);
+        expect(choice('Any payment method'), findsOneWidget);
+        semantics.dispose();
+      },
+    );
+
+    testWidgets(
+      'the counts follow the other choices, with their plural in French',
+      (tester) async {
+        await open(tester, locale: const Locale('fr'));
+        BlocProvider.of<BookCubit>(
+            tester.element(find.byType(BookFilterSentence)),
+          )
+          ..selectSide(BookSide.buy)
+          ..selectCurrencies([
+            RobosatsCurrency.all.firstWhere((c) => c.code == 'EUR'),
+          ]);
+        await settle(tester);
+        await tester.tap(choice('Tout mode de paiement'));
+        await settle(tester);
+
+        // To buy in euros: orders 1, 2, 5 and 7, so Revolut 2, Instant SEPA 2, Wise 1; Zelle (dollars), Bizum (francs) and order 4 (a buy order) are out.
+        expect(listedMethods(tester).take(4), [
+          'Instant SEPA',
+          'Revolut',
+          'Wise',
+          'Advcash',
+        ]);
+        expect(row('Instant SEPA · 2 ordres'), findsOneWidget);
+        expect(row('Wise · 1 ordre'), findsOneWidget);
+        expect(row('Aucun ordre pour l\'instant'), findsOneWidget);
+        expect(optionRow('Zelle'), findsNothing);
+        await pickRow(tester, '', step: 300, target: optionRow('Zelle'));
+        await closeSheet(tester);
+        await tester.tap(choice('Zelle'));
+        await settle(tester);
+        expect(row('Zelle · aucun ordre'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'the search narrows every group, ignoring case and accents; « Any » hidden meanwhile',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        await open(tester);
+        await tester.tap(choice('Any payment method'));
+        await settle(tester);
+        expect(
+          find.descendant(of: sheet, matching: find.bySemanticsLabel('Search')),
+          findsWidgets,
+        );
+
+        await typeSearch(tester, 'RÉV');
+        expect(listedMethods(tester), ['Revolut']);
+        expect(row('Revolut · 3 orders'), findsOneWidget);
+        expect(row('Any payment method'), findsNothing);
+        // No dimmed method matches: no heading.
+        expect(row('No orders right now'), findsNothing);
+
+        // Anywhere in the name, case ignored: the methods of the book and the others, each group in its order.
+        await typeSearch(tester, 'pAy');
+        final methods = listedMethods(tester);
+        expect(methods.first, 'AliPay');
+        expect(methods, contains('Paypal Friends & Family'));
+        expect(row('No orders right now'), findsOneWidget);
+
+        await typeSearch(tester, 'sepa');
+        expect(listedMethods(tester), ['Instant SEPA']);
+        await tester.tap(optionRow('Instant SEPA'));
+        await settle(tester);
+        expect(listed(tester), [1, 5]);
+
+        await typeSearch(tester, 'zzz');
+        expect(listedMethods(tester), isEmpty);
+        expect(row('No payment method found'), findsOneWidget);
+
+        // The button that empties the field brings everything back.
+        await tester.tap(find.bySemanticsLabel('Clear'));
+        await settle(tester);
+        expect(row('Any payment method'), findsOneWidget);
+        // The order is the one computed when the sheet opened: Instant SEPA, chosen meanwhile, stays in its place.
+        expect(listedMethods(tester).take(2), ['Revolut', 'Instant SEPA']);
+        await closeSheet(tester);
+
+        // The text typed is not kept; the choice is.
+        expect(choice('Instant SEPA'), findsOneWidget);
+        await tester.tap(choice('Instant SEPA'));
+        await settle(tester);
+        expect(
+          tester
+              .widget<TextField>(
+                find.descendant(of: sheet, matching: find.byType(TextField)),
+              )
+              .controller
+              ?.text,
+          isEmpty,
+        );
+        expect(row('Any payment method'), findsOneWidget);
+        semantics.dispose();
+      },
+    );
   });
 
   testWidgets(
@@ -600,6 +851,28 @@ void main() {
               matching: find.byType(FilterChoice),
             );
             expect(tester.getRect(any).right, lessThanOrEqualTo(320));
+            expect(tester.takeException(), isNull);
+
+            // The payment method sheet, its counts and heading, then its search with the keyboard up: the field and a row stay above the keyboard.
+            await tapShown(tester, any);
+            expect(tester.takeException(), isNull);
+            tester.view.viewInsets = const FakeViewPadding(bottom: 260 * 3);
+            addTearDown(tester.view.resetViewInsets);
+            await typeSearch(tester, 'e');
+            expect(tester.takeException(), isNull);
+            final field = find.descendant(
+              of: sheet,
+              matching: find.byType(TextField),
+            );
+            await tester.ensureVisible(field);
+            await settle(tester);
+            expect(tester.getRect(field).bottom, lessThanOrEqualTo(568 - 260));
+            expect(field.hitTestable(), findsOneWidget);
+            final firstRow = optionRow('Instant SEPA');
+            await tester.ensureVisible(firstRow);
+            await settle(tester);
+            expect(firstRow.hitTestable(), findsOneWidget);
+            expect(tester.getRect(firstRow).top, lessThan(568 - 260));
             expect(tester.takeException(), isNull);
           },
         );
