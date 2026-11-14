@@ -145,7 +145,7 @@ final class FakeOrderSwaps implements SwapFacade {
   /// Runs at each creation, before it answers: a test moves its clock there, as a slow service would.
   void Function()? onCreate;
 
-  /// When set, every creation answers this record, as a store holding another order would.
+  /// When set, every creation answers this record (and keeps it), as a store holding another order would.
   OrderSwapRecord? createAnswer;
 
   /// What every creation was asked: amount, destination, refund address, purpose, wallet, note, payin quoted.
@@ -200,7 +200,10 @@ final class FakeOrderSwaps implements SwapFacade {
     });
     onCreate?.call();
     if (createFailures.isNotEmpty) return Err(createFailures.removeAt(0));
-    if (createAnswer case final answer?) return Ok(answer);
+    if (createAnswer case final answer?) {
+      records[answer.localId] = answer;
+      return Ok(answer);
+    }
     // As the wallet's store (`OrderSwapRepositoryImpl._createOrderLocked`): an active order of the same purpose, environment, networks, amount, destination and wallet is answered instead of a new one; a `creating` one is an unknown outcome; one past its deadline is expired, and a new order created.
     for (final record in records.values.toList()) {
       if (!record.localStatus.isTerminal &&

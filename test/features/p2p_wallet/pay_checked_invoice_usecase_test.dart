@@ -1539,30 +1539,33 @@ void main() {
       expect(journal.only({'markUnknown', 'broadcast'}), isEmpty);
     });
 
-    test('a failed mark stops before the broadcast: nothing sent, the invoice closed to the wallet', () async {
-      for (final failure in [
-        const SwapStorageFailure('disk'),
-        const SwapOrderExpiredFailure('late'),
-      ]) {
-        reset();
-        swaps.markUnknownFailure = failure;
-        final refusal = refusalOf(await payOf(payInvoice()));
-        expect(
-          refusal,
-          isA<P2pWalletPaymentInterrupted>().having(
-            (r) => r.payment.id,
-            'payment',
-            'local-1',
-          ),
-        );
-        expect(refusal.fundsMayHaveMoved, isFalse);
-        expect(journal.only({'broadcast'}), isEmpty);
-        expect(
-          swaps.records['local-1']?.localStatus,
-          OrderSwapLocalStatus.readyToBroadcast,
-        );
-      }
-    });
+    test(
+      'a failed mark stops before the broadcast: nothing sent, the invoice closed to the wallet',
+      () async {
+        for (final failure in [
+          const SwapStorageFailure('disk'),
+          const SwapOrderExpiredFailure('late'),
+        ]) {
+          reset();
+          swaps.markUnknownFailure = failure;
+          final refusal = refusalOf(await payOf(payInvoice()));
+          expect(
+            refusal,
+            isA<P2pWalletPaymentInterrupted>().having(
+              (r) => r.payment.id,
+              'payment',
+              'local-1',
+            ),
+          );
+          expect(refusal.fundsMayHaveMoved, isFalse);
+          expect(journal.only({'broadcast'}), isEmpty);
+          expect(
+            swaps.records['local-1']?.localStatus,
+            OrderSwapLocalStatus.readyToBroadcast,
+          );
+        }
+      },
+    );
 
     test(
       'a saved transaction other than the one signed is never broadcast',
@@ -1786,7 +1789,10 @@ void main() {
         ]) {
           reset();
           swaps.hold(record);
-          expect(refusalOf(await payOf(invoice)), isA<P2pWalletPaymentExists>());
+          expect(
+            refusalOf(await payOf(invoice)),
+            isA<P2pWalletPaymentExists>(),
+          );
           expect(journal.events, isEmpty);
         }
       },

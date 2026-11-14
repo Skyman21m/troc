@@ -217,44 +217,47 @@ void main() {
   });
 
   group('provably unspent', () {
-    test('the service\'s payin statuses: only « nothing received » ones leave an order unspent', () {
-      for (final (status, unspent) in [
-        ('', true),
-        ('Not started', true),
-        ('Awaiting payment', true),
-        ('pending', true),
-        (' Pending ', true),
-        ('In progress', false),
-        ('Under review', false),
-        ('Awaiting confirmation', false),
-        ('Completed', false),
-        ('Rejected', false),
-        ('Unknown', false),
-        ('something new', false),
-      ]) {
-        for (final ours in [true, false]) {
-          expect(
-            WalletPaymentRepositoryImpl.isProvablyUnspent(
-              recordOf(OrderSwapLocalStatus.expired, payinStatus: status),
-              ours: ours,
-            ),
-            unspent,
-            reason: '« $status » $ours',
-          );
+    test(
+      'the service\'s payin statuses: only « nothing received » ones leave an order unspent',
+      () {
+        for (final (status, unspent) in [
+          ('', true),
+          ('Not started', true),
+          ('Awaiting payment', true),
+          ('pending', true),
+          (' Pending ', true),
+          ('In progress', false),
+          ('Under review', false),
+          ('Awaiting confirmation', false),
+          ('Completed', false),
+          ('Rejected', false),
+          ('Unknown', false),
+          ('something new', false),
+        ]) {
+          for (final ours in [true, false]) {
+            expect(
+              WalletPaymentRepositoryImpl.isProvablyUnspent(
+                recordOf(OrderSwapLocalStatus.expired, payinStatus: status),
+                ours: ours,
+              ),
+              unspent,
+              reason: '« $status » $ours',
+            );
+          }
         }
-      }
-      expect(
-        WalletPaymentRepositoryImpl.isProvablyUnspent(
-          paymentRecord(
-            destination: payBolt11(),
-            status: OrderSwapLocalStatus.expired,
-            serviceTransactionId: 'service-saw-it',
+        expect(
+          WalletPaymentRepositoryImpl.isProvablyUnspent(
+            paymentRecord(
+              destination: payBolt11(),
+              status: OrderSwapLocalStatus.expired,
+              serviceTransactionId: 'service-saw-it',
+            ),
+            ours: true,
           ),
-          ours: true,
-        ),
-        isFalse,
-      );
-    });
+          isFalse,
+        );
+      },
+    );
 
     test(
       'each status, with nothing signed: this feature\'s and another feature\'s',
