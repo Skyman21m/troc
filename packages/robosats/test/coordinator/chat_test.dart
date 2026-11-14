@@ -1061,14 +1061,22 @@ void main() {
       () async {
         // An armor that decodes (its packets are not read here), padded with trailing spaces, which the armor reader drops, to exactly the bound.
         var size = 48000;
-        while (armorEncode(ArmorBlock.message, List.filled(size + 1, 7)).length <= ChatMessage.maxReadChars) {
+        while (armorEncode(
+              ArmorBlock.message,
+              List.filled(size + 1, 7),
+            ).length <=
+            ChatMessage.maxReadChars) {
           size++;
         }
         final armor = armorEncode(ArmorBlock.message, List.filled(size, 7));
         final padding = ' ' * (ChatMessage.maxReadChars - armor.length);
-        final atBound = referenceToWire(armor.replaceFirst('\n-----END', '$padding\n-----END'));
+        final atBound = referenceToWire(
+          armor.replaceFirst('\n-----END', '$padding\n-----END'),
+        );
         expect(atBound.length, ChatMessage.maxReadChars);
-        final over = referenceToWire(armor.replaceFirst('\n-----END', '$padding \n-----END'));
+        final over = referenceToWire(
+          armor.replaceFirst('\n-----END', '$padding \n-----END'),
+        );
         final page = _pageOk(
           await _fetch(
             _answering(
@@ -1806,8 +1814,14 @@ void main() {
       () async {
         // A real message's one-line form with some line feeds left as they are: the reference turns every backslash into a line feed and keeps the line feeds.
         final message = _outgoing('backslash rule');
-        var turn = 0;
-        final wire = message.wire.replaceAllMapped('\\', (_) => turn++.isEven ? '\\' : '\n');
+        final pieces = message.wire.split(r'\');
+        final buffer = StringBuffer(pieces.first);
+        for (var k = 1; k < pieces.length; k++) {
+          buffer
+            ..write(k.isEven ? r'\' : '\n')
+            ..write(pieces[k]);
+        }
+        final wire = buffer.toString();
         final page = _pageOk(
           await _fetch(
             _answering(
