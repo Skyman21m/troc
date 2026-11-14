@@ -30,7 +30,7 @@ void main() {
     String? transactionId,
     String payinStatus = 'pending',
     String localId = 'local-1',
-    String? note = 'RoboSats',
+    String? note = ourNote,
   }) => paymentRecord(
     localId: localId,
     destination: (invoice ?? payInvoice()).bolt11,
@@ -217,6 +217,45 @@ void main() {
   });
 
   group('provably unspent', () {
+    test('the service\'s payin statuses: only « nothing received » ones leave an order unspent', () {
+      for (final (status, unspent) in [
+        ('', true),
+        ('Not started', true),
+        ('Awaiting payment', true),
+        ('pending', true),
+        (' Pending ', true),
+        ('In progress', false),
+        ('Under review', false),
+        ('Awaiting confirmation', false),
+        ('Completed', false),
+        ('Rejected', false),
+        ('Unknown', false),
+        ('something new', false),
+      ]) {
+        for (final ours in [true, false]) {
+          expect(
+            WalletPaymentRepositoryImpl.isProvablyUnspent(
+              recordOf(OrderSwapLocalStatus.expired, payinStatus: status),
+              ours: ours,
+            ),
+            unspent,
+            reason: '« $status » $ours',
+          );
+        }
+      }
+      expect(
+        WalletPaymentRepositoryImpl.isProvablyUnspent(
+          paymentRecord(
+            destination: payBolt11(),
+            status: OrderSwapLocalStatus.expired,
+            serviceTransactionId: 'service-saw-it',
+          ),
+          ours: true,
+        ),
+        isFalse,
+      );
+    });
+
     test(
       'each status, with nothing signed: this feature\'s and another feature\'s',
       () {
@@ -560,24 +599,13 @@ void main() {
           isA<Ok<Object?, P2pWalletRefusal>>(),
         );
         expect(invoices.reads, hasLength(reads));
-        // An order of this feature whose invoice the decoder cannot read: never « none », but Unavailable (fail closed), for the look-up and for a new payment.
+        // An order whose invoice the decoder cannot read at all yields no hash: not given for any hash, and no reason to answer nothing at all (the second security pass's S3).
         invoices.known.clear();
         final fresh = WalletPaymentRepositoryImpl(swaps, invoices);
-        expect(
-          await fresh.find(invoice.paymentHash),
-          isA<Err<P2pWalletPaymentFound?, P2pWalletRefusal>>().having(
-            (e) => e.failure,
-            'failure',
-            isA<P2pWalletUnavailable>(),
-          ),
-        );
+        expect(await fresh.find(invoice.paymentHash), _isOk(isNull));
         expect(
           await fresh.earlierAttemptsOf(payInvoice(tag: 'z', hash: payHash(7))),
-          isA<Err<Set<String>, P2pWalletRefusal>>().having(
-            (e) => e.failure,
-            'failure',
-            isA<P2pWalletUnavailable>(),
-          ),
+          _isOk(isEmpty),
         );
       },
     );

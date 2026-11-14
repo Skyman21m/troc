@@ -13,6 +13,9 @@ import 'package:p2p/testing.dart' show checkedBolt11InvoiceForTesting;
 
 import 'fakes.dart';
 
+/// The note by which the feature knows its orders (`WalletPaymentRepository.note`), written out.
+const ourNote = 'RoboSats · Bull Market P2P';
+
 /// What the fakes of a payment did, in order, as one list: the order of the side effects is what the tests pin.
 final class Journal {
   final List<String> events = [];
@@ -79,6 +82,9 @@ CheckedBolt11Invoice payInvoice({
 /// The wallet's decoder, as a test writes it: each invoice it knows reads as given, any other is unreadable. It records every text it was given.
 final class FakeWalletInvoices implements WalletInvoiceRepository {
   final Map<String, Result<WalletInvoice, P2pWalletRefusal>> known = {};
+
+  /// Invoices the decoder reads only a hash of (no amount, or a fraction of a satoshi): [read] refuses them, [paymentHashOf] gives their hash.
+  final Map<String, String> hashOnly = {};
   final List<String> reads = [];
 
   /// Makes [invoice] readable as it says, unless [read] says otherwise.
@@ -97,6 +103,15 @@ final class FakeWalletInvoices implements WalletInvoiceRepository {
   Future<Result<WalletInvoice, P2pWalletRefusal>> read(String bolt11) async {
     reads.add(bolt11);
     return known[bolt11] ?? const Err(P2pWalletInvoiceUnreadable());
+  }
+
+  @override
+  Future<String?> paymentHashOf(String bolt11) async {
+    reads.add(bolt11);
+    return switch (known[bolt11]) {
+      Ok(:final value) => value.paymentHash,
+      _ => hashOnly[bolt11],
+    };
   }
 }
 
@@ -378,7 +393,7 @@ OrderSwapRecord paymentRecord({
   BigInt? payin,
   BigInt? payout,
   String? walletId = 'instant',
-  String? note = 'RoboSats',
+  String? note = ourNote,
   OrderSwapPurpose purpose = OrderSwapPurpose.sendLightning,
   DateTime? createdAt,
   DateTime? deadline,
@@ -392,6 +407,7 @@ OrderSwapRecord paymentRecord({
   OrderSwapEnvironment environment = OrderSwapEnvironment.mainnet,
   String? payoutAddress,
   bool withoutPayoutAddress = false,
+  String? serviceTransactionId,
 }) {
   final requested = amount ?? BigInt.from(600);
   final created = createdAt ?? testNow;
@@ -434,6 +450,7 @@ OrderSwapRecord paymentRecord({
             confirmationDeadline:
                 deadline ?? created.add(const Duration(minutes: 10)),
             liquidAddress: payinAddress,
+            liquidTransactionId: serviceTransactionId,
             lightningInvoice: withoutPayoutAddress
                 ? null
                 : payoutAddress ?? destination,

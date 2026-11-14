@@ -431,6 +431,10 @@ void main() {
       const P2pWalletBroadcastUnknown(
         P2pWalletPayment(id: 'local-1', paymentHash: testPaymentHash),
       ),
+      const P2pWalletOrderExpiresTooSoon(),
+      const P2pWalletPaymentInterrupted(
+        P2pWalletPayment(id: 'local-1', paymentHash: testPaymentHash),
+      ),
     ];
     for (final refusal in refusals) {
       expect('$refusal', '${refusal.runtimeType}');
@@ -462,8 +466,10 @@ void main() {
       P2pWalletQuoteChanged() => 'changed',
       P2pWalletPaymentExists() => 'payment exists',
       P2pWalletBroadcastUnknown() => 'broadcast unknown',
+      P2pWalletOrderExpiresTooSoon() => 'order too late',
+      P2pWalletPaymentInterrupted() => 'interrupted',
     };
-    expect(refusals.map(name).toSet(), hasLength(18));
+    expect(refusals.map(name).toSet(), hasLength(20));
   });
 
   test('a payment and its progress print no id, hash or text', () {

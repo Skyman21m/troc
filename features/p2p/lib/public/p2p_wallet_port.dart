@@ -432,3 +432,15 @@ final class P2pWalletBroadcastUnknown extends P2pWalletRefusal {
   @override
   bool get fundsMayHaveMoved => true;
 }
+
+/// The swap order the service answered leaves too little time to fund it before its own deadline (less than the wallet's margin): nothing was signed or sent. A new confirmation after that deadline gets a new order.
+final class P2pWalletOrderExpiresTooSoon extends P2pWalletRefusal {
+  const P2pWalletOrderExpiresTooSoon();
+}
+
+/// The payment stopped after its funding transaction was signed, while it was being saved or marked « broadcast unknown » (a step that failed or did not answer in time): this call broadcast nothing, but the order's record may hold the signed transaction or say « broadcast unknown », so the invoice is not paid again from this wallet. [payment] is followed with [P2pWalletPort.watchPayment] and found with [P2pWalletPort.findPayment], which tell where it stands.
+final class P2pWalletPaymentInterrupted extends P2pWalletRefusal {
+  final P2pWalletPayment payment;
+
+  const P2pWalletPaymentInterrupted(this.payment);
+}

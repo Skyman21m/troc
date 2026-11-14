@@ -60,6 +60,19 @@ class WalletInvoiceRepositoryImpl implements WalletInvoiceRepository {
     );
   }
 
+  @override
+  Future<String?> paymentHashOf(String bolt11) async {
+    try {
+      final hash = (await _decode(bolt11)).paymentHash.toLowerCase();
+      return _paymentHash.hasMatch(hash) ? hash : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// A payment hash: 64 hexadecimal characters.
+  static final _paymentHash = RegExp(r'^[0-9a-f]{64}$');
+
   /// The last second a `DateTime` holds comfortably (year 9999): a later expiry is not one to read.
   static const _latestSecond = 253402300799;
 }

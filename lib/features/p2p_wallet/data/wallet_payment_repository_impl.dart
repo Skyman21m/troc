@@ -35,14 +35,9 @@ class WalletPaymentRepositoryImpl implements WalletPaymentRepository {
       if (record.destination.toLowerCase() == text) {
         matching.add(record);
       } else if (_isOurs(record)) {
-        switch (await _paymentHashOf(record)) {
-          case null:
-            // An order of this feature whose invoice cannot be read could be one of the same hash, and is not known to be unspent: refused.
-            return const Err(P2pWalletUnavailable());
-          case final hash when hash == invoice.paymentHash:
-            matching.add(record);
-          case _:
-            break;
+        // An order whose invoice yields no payment hash cannot be tied to this invoice; its own text is covered above. It blocks nothing else: an unspent one paid nothing, and this feature decodes every invoice with the same decoder before it creates an order, so an order it made always reads (see [_paymentHashOf]).
+        if (await _paymentHashOf(record) == invoice.paymentHash) {
+          matching.add(record);
         }
       }
     }
@@ -72,9 +67,10 @@ class WalletPaymentRepositoryImpl implements WalletPaymentRepository {
   /// A record is provably unspent when it holds no signed payin and no transaction id, its service order is not under review, and its status is one in which nothing was signed: the creation (`creating`, `creationUnknown`), the order waiting for its funding (`awaitingUserConfirmation`, `preparingPayin`), or an end with nothing signed (`expired`, `failed`). A record signed (`readyToBroadcast`), « broadcast unknown », broadcast, paid out, completed or refunded is not, nor is anything not listed. An order of this feature is never funded later (nothing resumes it); an order of another feature (the wallet's Send screen) that has not ended may still be funded by its screen, so only its ends count as unspent ([ours] false).
   /// The reason: the swap service is paid by a Liquid transaction of this wallet; a second attempt while the first one's transaction may exist would send the amount twice, and getting the second back would depend on the service's refund.
   static bool isProvablyUnspent(OrderSwapRecord record, {required bool ours}) {
+    final order = record.order;
     if (record.signedPayinTransaction != null ||
         record.localPayinTransactionId != null ||
-        (record.order?.requiresManualReview ?? false)) {
+        (order != null && _serviceSawPayin(order))) {
       return false;
     }
     return switch (record.localStatus) {
@@ -105,15 +101,8 @@ class WalletPaymentRepositoryImpl implements WalletPaymentRepository {
     }
     final matching = <OrderSwapRecord>[];
     for (final record in records.where(_isOurs)) {
-      switch (await _paymentHashOf(record)) {
-        case null:
-          // Fail closed: that order could be the payment looked for.
-          return const Err(P2pWalletUnavailable());
-        case final hash when hash == paymentHash:
-          matching.add(record);
-        case _:
-          break;
-      }
+      // An order whose invoice yields no payment hash cannot be the payment of [paymentHash] as far as anything can tell; it is not a reason to answer nothing at all (see [earlierAttemptsOf]).
+      if (await _paymentHashOf(record) == paymentHash) matching.add(record);
     }
     if (matching.isEmpty) return const Ok(null);
     final latest = _latest(matching);
@@ -231,7 +220,23 @@ class WalletPaymentRepositoryImpl implements WalletPaymentRepository {
     }
   }
 
-  /// Whether [record] is an order this feature created: a Lightning payment from Liquid with this feature's note.
+  /// The payin statuses in which the swap service reports nothing received: empty, « not started », « awaiting payment » (the values of the exchange's `OrderPayinStatus`, `lib/core/exchange/domain/entity/order.dart`, which the order service shares) and « pending » (what the wallet's own tests give a fresh order). Any other value (« in progress », « under review », « awaiting confirmation », « completed », « rejected », an unknown one) is the service's evidence of a payin.
+  static const _noPayinStatuses = {
+    '',
+    'not started',
+    'awaiting payment',
+    'pending',
+  };
+
+  /// Whether the swap service reports a payin for [order]: a payin status other than [_noPayinStatuses] (its manual review included), or a transaction id it recorded, whoever sent it.
+  static bool _serviceSawPayin(OrderSwap order) =>
+      !_noPayinStatuses.contains(order.payinStatus.trim().toLowerCase()) ||
+      order.liquidTransactionId != null ||
+      order.bitcoinTransactionId != null;
+
+  /// Whether [record] is an order this feature created: a Lightning payment from Liquid with this feature's note, a fixed text a user does not type by chance ([WalletPaymentRepository.note]).
+  ///
+  /// The note is the only field set at the creation that this feature can read back and that the wallet's Send screen does not decide by itself: the Send screen stores the user's own label there, and every other field is the same as a Send-screen order's (a destination wallet would mark it so, but the wallet's history would then show the payment as a transfer). An order of the Send screen labelled with that exact text would be taken for this feature's; it stays safe: one order holds one payin (the wallet's store refuses a second signed payin on a record), so paying on it leaves the Send screen's own attempt on it to fail.
   static bool _isOurs(OrderSwapRecord record) =>
       record.purpose == OrderSwapPurpose.sendLightning &&
       record.inNetwork == OrderSwapNetwork.liquid &&
@@ -245,19 +250,16 @@ class WalletPaymentRepositoryImpl implements WalletPaymentRepository {
   ) async =>
       _isOurs(record) && await _paymentHashOf(record) == payment.paymentHash;
 
-  /// The payment hash of the invoice [record] pays, as the wallet's decoder reads it, or `null`.
+  /// The payment hash of the invoice [record] pays, as the wallet's decoder reads it (only the hash: an invoice without an amount or for a fraction of a satoshi, which the wallet's Send screen pays, reads too), or `null` when nothing can be read.
   ///
+  /// `null` is possible only for an order this feature did not make (a payment of the wallet's own screens that happens to carry the feature's note) or after a change of the decoder: `PayCheckedInvoiceUsecase` reads every invoice with this decoder before it creates its order.
   /// An order's destination never changes: a hash read once is kept for the run of the app, so that each payment and each look-up decodes only the orders it has not decoded before (a few per payment, the history of this feature's orders at the first look-up). A failed read is not kept.
   Future<String?> _paymentHashOf(OrderSwapRecord record) async {
     final known = _hashes[record.destination];
     if (known != null) return known;
-    switch (await _invoices.read(record.destination)) {
-      case Ok(:final value):
-        _hashes[record.destination] = value.paymentHash;
-        return value.paymentHash;
-      case Err():
-        return null;
-    }
+    final hash = await _invoices.paymentHashOf(record.destination);
+    if (hash != null) _hashes[record.destination] = hash;
+    return hash;
   }
 
   /// The latest of [records], by creation.

@@ -170,7 +170,7 @@ const testPaymentHash =
 ///
 /// The balance of each network is the one given to the constructor, or the last given to [setBalance], at each subscription, then each value given to [setBalance]; a refusal given there ends the subscriptions open, as the port's does.
 /// Each [quote] takes the next answer of [scriptQuote], in order, and each [payInvoice] the next of [scriptPayment]; either fails with a `StateError` when none is left, so that a test never gets an answer it did not write.
-/// Like the real port, [payInvoice] takes a quote once (a quote presented again is `P2pWalletQuoteStale`, without taking an answer) and gives an invoice one attempt: once a payment of a payment hash was answered with a handle (or `P2pWalletBroadcastUnknown`), a later payment of that hash is `P2pWalletPaymentExists` with the progress last set for it (preparing when none), without taking an answer either.
+/// Like the real port, [payInvoice] takes a quote once (a quote presented again is `P2pWalletQuoteStale`, without taking an answer) and gives an invoice one attempt: once a payment of a payment hash was answered with a handle (or `P2pWalletBroadcastUnknown`, `P2pWalletPaymentInterrupted`), a later payment of that hash is `P2pWalletPaymentExists` with the progress last set for it (preparing when none), without taking an answer either.
 /// [watchPayment] gives the last progress given to [setProgress] for that payment, then each new one; a refusal ends the stream. [findPayment] answers what [setFound] gave for the hash, `null` otherwise.
 /// It records what it was asked: [balanceRequests], [quoted], [paid] and [found].
 @visibleForTesting
@@ -294,7 +294,8 @@ final class FakeP2pWalletPort implements P2pWalletPort {
     switch (answer) {
       case Ok(:final value):
         _attempts[invoice.paymentHash] = value;
-      case Err(failure: P2pWalletBroadcastUnknown(:final payment)):
+      case Err(failure: P2pWalletBroadcastUnknown(:final payment)) ||
+          Err(failure: P2pWalletPaymentInterrupted(:final payment)):
         _attempts[invoice.paymentHash] = payment;
       case Err():
         break;

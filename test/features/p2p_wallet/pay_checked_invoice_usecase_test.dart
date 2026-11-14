@@ -176,7 +176,7 @@ void main() {
           'purpose': OrderSwapPurpose.sendLightning,
           'environment': OrderSwapEnvironment.mainnet,
           'wallet': 'instant',
-          'note': 'RoboSats',
+          'note': 'RoboSats · Bull Market P2P',
           'quoted': BigInt.from(603),
         });
         // The refund address is the wallet's last revealed one, as the Send feature takes it; no new address is revealed.
@@ -501,7 +501,7 @@ void main() {
     OrderSwapRecord earlierOf(
       CheckedBolt11Invoice invoice,
       OrderSwapLocalStatus status, {
-      String? note = 'RoboSats',
+      String? note = ourNote,
       String localId = 'earlier',
       bool signed = false,
       bool sent = false,
@@ -729,7 +729,7 @@ void main() {
           ),
         );
         expect(journal.events, isEmpty);
-        // The review's probe HASH-UNDECODABLE: an order of this feature whose invoice the decoder cannot read could be of the same hash: refused, fail closed.
+        // The review's probe HASH-UNDECODABLE, as the second pass decided: an order of this feature whose invoice yields no hash cannot be tied to another invoice, and blocks nothing but its own text.
         reset();
         swaps.hold(
           paymentRecord(
@@ -739,11 +739,7 @@ void main() {
             transactionId: 't',
           ),
         );
-        expect(
-          refusalOf(await payOf(payInvoice())),
-          isA<P2pWalletUnavailable>(),
-        );
-        expect(journal.events, isEmpty);
+        paymentOf(await payOf(payInvoice()));
         // An order of the wallet's own Send with the same hash is not this feature's: only its text would match.
         reset();
         invoices.learn(earlier);
@@ -1256,8 +1252,9 @@ void main() {
           ('create', isA<P2pWalletServiceUnreachable>(), 0),
           ('build', isA<P2pWalletUnavailable>(), 0),
           ('sign', isA<P2pWalletUnavailable>(), 0),
-          ('save', isA<P2pWalletUnavailable>(), 0),
-          ('markUnknown', isA<P2pWalletUnavailable>(), 0),
+          // A save or a mark that may complete late: nothing broadcast, but the caller must look (the second security pass's S8, S9).
+          ('save', isA<P2pWalletPaymentInterrupted>(), 0),
+          ('markUnknown', isA<P2pWalletPaymentInterrupted>(), 0),
           ('broadcast', isA<P2pWalletBroadcastUnknown>(), 1),
         ]) {
           timeouts = short;
@@ -1542,14 +1539,23 @@ void main() {
       expect(journal.only({'markUnknown', 'broadcast'}), isEmpty);
     });
 
-    test('a failed mark stops before the broadcast, nothing sent', () async {
-      for (final (failure, refusal) in [
-        (const SwapStorageFailure('disk'), isA<P2pWalletUnavailable>()),
-        (const SwapOrderExpiredFailure('late'), isA<P2pWalletServiceRefused>()),
+    test('a failed mark stops before the broadcast: nothing sent, the invoice closed to the wallet', () async {
+      for (final failure in [
+        const SwapStorageFailure('disk'),
+        const SwapOrderExpiredFailure('late'),
       ]) {
         reset();
         swaps.markUnknownFailure = failure;
-        expect(refusalOf(await payOf(payInvoice())), refusal);
+        final refusal = refusalOf(await payOf(payInvoice()));
+        expect(
+          refusal,
+          isA<P2pWalletPaymentInterrupted>().having(
+            (r) => r.payment.id,
+            'payment',
+            'local-1',
+          ),
+        );
+        expect(refusal.fundsMayHaveMoved, isFalse);
         expect(journal.only({'broadcast'}), isEmpty);
         expect(
           swaps.records['local-1']?.localStatus,
@@ -1564,7 +1570,7 @@ void main() {
         swaps.savedInstead = 'signed-by-someone-else';
         expect(
           refusalOf(await payOf(payInvoice())),
-          isA<P2pWalletUnavailable>(),
+          isA<P2pWalletPaymentInterrupted>(),
         );
         expect(journal.only({'broadcast'}), isEmpty);
       },
@@ -1640,6 +1646,204 @@ void main() {
         true,
       ]);
     });
+  });
+
+  group('the second security pass:', () {
+    test(
+      'S3: an order with the feature\'s note whose invoice has no amount, or a fraction of a sat, switches nothing off',
+      () async {
+        for (final funded in [false, true]) {
+          for (final odd in ['amountless', 'sub-satoshi']) {
+            reset();
+            final oddText = payBolt11(tag: odd == 'amountless' ? 'x' : 'y');
+            invoices.hashOnly[oddText] = payHash(5);
+            swaps.hold(
+              paymentRecord(
+                localId: 'odd',
+                destination: oddText,
+                status: funded
+                    ? OrderSwapLocalStatus.payinBroadcast
+                    : OrderSwapLocalStatus.expired,
+                signed: funded ? 's' : null,
+                transactionId: funded ? 't' : null,
+              ),
+            );
+            final reads = WalletPaymentRepositoryImpl(swaps, invoices);
+            // Another invoice still pays, and is found.
+            final other = payInvoice();
+            paymentOf(await payOf(other));
+            expect(
+              await reads.find(other.paymentHash),
+              isA<Ok<P2pWalletPaymentFound?, P2pWalletRefusal>>().having(
+                (ok) => ok.value?.payment.id,
+                'id',
+                'local-1',
+              ),
+              reason: '$odd $funded',
+            );
+            // The odd order is found by its own hash, read leniently.
+            expect(
+              await reads.find(payHash(5)),
+              isA<Ok<P2pWalletPaymentFound?, P2pWalletRefusal>>().having(
+                (ok) => ok.value?.payment.id,
+                'id',
+                'odd',
+              ),
+              reason: '$odd $funded',
+            );
+            // An invoice of the odd order's hash: paid again only while it moved nothing.
+            final sameHash = payInvoice(tag: 'p', hash: payHash(5));
+            final again = await payOf(sameHash);
+            if (funded) {
+              expect(refusalOf(again), isA<P2pWalletPaymentExists>());
+            } else {
+              paymentOf(again);
+            }
+          }
+        }
+      },
+    );
+
+    test(
+      'an order whose invoice yields no hash: blocks its own text only, and only when it may have moved funds',
+      () async {
+        final invoice = payInvoice();
+        for (final (destination, funded, blocks) in [
+          (payBolt11(tag: 'z'), true, false),
+          (payBolt11(tag: 'z'), false, false),
+          (invoice.bolt11.toUpperCase(), true, true),
+          (invoice.bolt11.toUpperCase(), false, false),
+        ]) {
+          reset();
+          swaps.hold(
+            paymentRecord(
+              localId: 'unreadable',
+              destination: destination,
+              status: funded
+                  ? OrderSwapLocalStatus.payinBroadcast
+                  : OrderSwapLocalStatus.expired,
+              signed: funded ? 's' : null,
+              transactionId: funded ? 't' : null,
+            ),
+          );
+          final result = await payOf(invoice);
+          if (blocks) {
+            expect(refusalOf(result), isA<P2pWalletPaymentExists>());
+          } else {
+            paymentOf(result);
+          }
+        }
+      },
+    );
+
+    test(
+      'S4: a Send-screen order labelled with the feature\'s exact note, open, is paid on once; the store keeps one signed payin per order',
+      () async {
+        final invoice = payInvoice();
+        swaps.hold(
+          paymentRecord(
+            localId: 'send-labelled',
+            destination: invoice.bolt11,
+            deadline: testNow.add(const Duration(minutes: 5)),
+          ),
+        );
+        final payment = paymentOf(await payOf(invoice));
+        expect(payment.id, 'send-labelled');
+        expect(journal.only({'broadcast'}), hasLength(1));
+        // The Send screen's own save on that order is then refused by the store.
+        expect(
+          await swaps.savePreparedPayin(
+            localId: 'send-labelled',
+            signedTransaction: 'signed-by-send',
+            isPsbt: false,
+          ),
+          isA<Err<OrderSwapRecord, SwapFailure>>(),
+        );
+      },
+    );
+
+    test(
+      'S2: an order the service reports funded, from outside the app, is not unspent',
+      () async {
+        final invoice = payInvoice();
+        for (final record in [
+          paymentRecord(
+            destination: invoice.bolt11,
+            status: OrderSwapLocalStatus.failed,
+            note: null,
+            payinStatus: 'Completed',
+          ),
+          paymentRecord(
+            destination: invoice.bolt11,
+            status: OrderSwapLocalStatus.expired,
+            payinStatus: 'In progress',
+          ),
+          paymentRecord(
+            destination: invoice.bolt11,
+            status: OrderSwapLocalStatus.expired,
+            serviceTransactionId: 'service-saw-it',
+          ),
+        ]) {
+          reset();
+          swaps.hold(record);
+          expect(refusalOf(await payOf(invoice)), isA<P2pWalletPaymentExists>());
+          expect(journal.events, isEmpty);
+        }
+      },
+    );
+
+    test(
+      'S6: an order whose own deadline is less than the margin away is not funded; at the margin it is',
+      () async {
+        for (final (left, pays) in [
+          (const Duration(seconds: 5), false),
+          (const Duration(seconds: 59), false),
+          (const Duration(seconds: 60), true),
+        ]) {
+          // Reused: an earlier unspent order of this feature.
+          reset();
+          final invoice = payInvoice();
+          swaps.hold(
+            paymentRecord(
+              localId: 'earlier',
+              destination: invoice.bolt11,
+              deadline: testNow.add(left),
+            ),
+          );
+          final reused = await payOf(invoice);
+          // New: the service answers an order that expires that soon.
+          reset();
+          swaps.createAnswer = paymentRecord(
+            destination: invoice.bolt11,
+            deadline: testNow.add(left),
+          );
+          final created = await payOf(invoice);
+          for (final result in [reused, created]) {
+            if (pays) {
+              paymentOf(result);
+            } else {
+              expect(refusalOf(result), isA<P2pWalletOrderExpiresTooSoon>());
+              expect(refusalOf(result).fundsMayHaveMoved, isFalse);
+            }
+          }
+          if (!pays) expectNothingMoved();
+        }
+      },
+    );
+
+    test(
+      'S9: a mark that answers late: the caller is told to look, and the record then says so',
+      () async {
+        timeouts = const PayTimeouts(storing: Duration(milliseconds: 50));
+        reset();
+        final invoice = payInvoice();
+        journal.hanging.add('markUnknown');
+        final refusal = refusalOf(await payOf(invoice));
+        expect(refusal, isA<P2pWalletPaymentInterrupted>());
+        expect(journal.only({'broadcast'}), isEmpty);
+        timeouts = const PayTimeouts();
+      },
+    );
   });
 
   group('no text:', () {

@@ -26,9 +26,9 @@ import 'package:p2p/p2p.dart';
 /// 2. every earlier order of the wallet's records for this invoice is provably unspent, else [P2pWalletPaymentExists];
 /// 3. before the order: the balance covers the total accepted, and an unsigned transaction of the payin accepted can be built from the wallet's coins with a network fee at most the one quoted (the quote's own estimate, made again);
 /// 4. the order is created with the invoice as its destination, an address of the wallet as the refund destination, and the payin the user accepted as the quoted counterpart, retried once when the service asks to wait, if the wait is short and leaves the margin; the order answered must be this payment's (its note, wallet, destination, environment, amounts and status). The wallet's store answers an earlier active order of the same destination, amount, wallet and purpose instead of a new one when its deadline has not passed (`OrderSwapRepositoryImpl.createOrder`): an earlier unspent order of this feature is then paid on, the cap applying to its payin; past its deadline the store expires it and creates a new order, and the old one expires at the service;
-/// 5. the payin the order asks is at most the one the user accepted, the app's own cap, much tighter than the wallet's tolerance of max(1 %, 1,000 sats): else [P2pWalletQuoteChanged];
+/// 5. the order's own deadline is [invoiceMargin] away at least ([P2pWalletOrderExpiresTooSoon]); the payin the order asks is at most the one the user accepted, the app's own cap, much tighter than the wallet's tolerance of max(1 %, 1,000 sats): else [P2pWalletQuoteChanged];
 /// 6. the funding transaction is built at the wallet's Liquid fee rate, by the wallet, to the order's payin address; the wallet's net outflow of L-BTC, fee excluded, must equal the payin (fail closed; the wallet's read does not tell the destination, see [execute]), and its fee and the total must stay within the quote; the margin is checked again;
-/// 7. it is signed, saved on the order, the order marked « broadcast unknown », the **saved** transaction broadcast, and the order marked broadcast with its transaction id;
+/// 7. it is signed, saved on the order, the order marked « broadcast unknown », the **saved** transaction broadcast, and the order marked broadcast with its transaction id; a failure once the signed transaction may be saved is [P2pWalletPaymentInterrupted] (nothing broadcast, the invoice closed to this wallet);
 /// 8. the handle is returned.
 /// Nothing resumes or retries a payment: an order left signed or « broadcast unknown » by a crash is reported as such by the reads of the port, and finishing it is not this use case's.
 /// Calls run one after the other ([execute] waits for the previous one), so that two payments of one invoice at once see each other's order, and two transactions are never built from the same coins at once; each step is bounded by [PayTimeouts], so that one call that hangs does not hold the next ones.
@@ -262,6 +262,9 @@ class PayCheckedInvoiceUsecase {
       paymentHash: invoice.paymentHash,
     );
 
+    // The order must leave the margin to fund it before its own deadline, as the invoice must.
+    if (_orderTooLate(order) case final refusal?) return Err(refusal);
+
     // 5. The cap: never more to the service than the payin the user accepted.
     final payin = order.payinAmountSat;
     if (payin > accepted.payin.value) {
@@ -313,10 +316,11 @@ class PayCheckedInvoiceUsecase {
         payin + BigInt.from(fee) > accepted.total.value) {
       return const Err(P2pWalletQuoteChanged());
     }
-    // The order took time to create: the margin is checked again just before the signature.
+    // The order took time to create: the margins are checked again just before the signature.
     if (_lateRefusal(invoice.payableUntil) case final refusal?) {
       return Err(refusal);
     }
+    if (_orderTooLate(order) case final refusal?) return Err(refusal);
 
     // 7. Sign, save, mark unknown, broadcast the saved transaction, mark broadcast.
     final String signed;
@@ -339,12 +343,16 @@ class PayCheckedInvoiceUsecase {
             when value.localStatus == OrderSwapLocalStatus.readyToBroadcast &&
                 value.signedPayinTransaction == signed:
           break;
-        case Ok() || Err():
+        case Ok():
+          // The record holds a signed payin, perhaps not this one: nothing is broadcast, and the invoice is not paid again.
+          return Err(P2pWalletPaymentInterrupted(payment));
+        case Err():
+          // Not saved: nothing holds the signed transaction, nothing moved, and the order stays unspent.
           return const Err(P2pWalletUnavailable());
       }
     } catch (_) {
-      // Nothing was broadcast; a save that completes late leaves the order signed, which nothing broadcasts.
-      return const Err(P2pWalletUnavailable());
+      // Nothing was broadcast, but a save that completes late leaves the order signed, which nothing broadcasts and which closes this invoice to the wallet.
+      return Err(P2pWalletPaymentInterrupted(payment));
     }
     final String saved;
     try {
@@ -356,20 +364,16 @@ class PayCheckedInvoiceUsecase {
           // The transaction broadcast is the one saved on the order, read back from it, and only if it is the one just signed.
           final persisted = value.signedPayinTransaction;
           if (persisted == null || persisted != signed) {
-            return const Err(P2pWalletUnavailable());
+            return Err(P2pWalletPaymentInterrupted(payment));
           }
           saved = persisted;
-        case Ok():
-          return const Err(P2pWalletUnavailable());
-        case Err(failure: SwapOrderExpiredFailure()):
-          // The order's deadline passed before the broadcast: nothing was sent.
-          return const Err(P2pWalletServiceRefused());
-        case Err():
-          return const Err(P2pWalletUnavailable());
+        case Ok() || Err():
+          // The signed payin is saved on the order (and its deadline may have passed): nothing was broadcast, and the invoice is not paid again from this wallet.
+          return Err(P2pWalletPaymentInterrupted(payment));
       }
     } catch (_) {
-      // Nothing was broadcast; a mark that completes late says « broadcast unknown » of an order nothing sent.
-      return const Err(P2pWalletUnavailable());
+      // Nothing was broadcast; a mark that completes late says « broadcast unknown » of an order nothing sent. The caller looks where it stands.
+      return Err(P2pWalletPaymentInterrupted(payment));
     }
     final String transactionId;
     try {
@@ -457,6 +461,12 @@ class PayCheckedInvoiceUsecase {
         ? const P2pWalletInvoiceExpiresTooSoon()
         : const P2pWalletInvoiceExpired();
   }
+
+  /// [P2pWalletOrderExpiresTooSoon] when [order]'s deadline for its funding is less than [invoiceMargin] away (the service may drop an order funded late, and the funds then depend on its refund); `null` otherwise.
+  P2pWalletRefusal? _orderTooLate(OrderSwap order) =>
+      order.confirmationDeadline.difference(_now()) < invoiceMargin
+      ? const P2pWalletOrderExpiresTooSoon()
+      : null;
 
   /// The wallet cannot fund the payment: it has its balance, and needs the total accepted, or more than it has.
   static P2pWalletNotEnoughBalance _short(
