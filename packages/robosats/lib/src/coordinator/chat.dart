@@ -286,6 +286,7 @@ final class ChatPage {
     }
     return reached;
   }
+
   /// [contiguousIndex], carried over the indexes the reference's own numbering skips: an index that the page holds `m` times lets the `m - 1` indexes right after it be missing, since two posts at once share an index and the next post skips one (`chat/views.py:158-166`).
   ///
   /// The offset to poll from once a gap of that shape has held, unchanged, for several polls: a peer can cause one cheaply by posting twice at once, and polling from [contiguousIndex] would then read everything beyond it again at every poll.
@@ -310,7 +311,6 @@ final class ChatPage {
       }
     }
   }
-
 
   /// Whether two messages of the page carry the same encrypted message in canonical armor ([ChatMessage.armored]): one message shown again at another index, by a coordinator that replays it, or sent again by its sender after a post whose outcome was unknown.
   ///

@@ -760,23 +760,40 @@ void main() {
   });
 
   group('an error answer over the bound', () {
-    test('is too large as any answer, not a page too large; only a 200 is a page', () async {
-      final big = utf8.encode(jsonEncode({'detail': 'x' * (CoordinatorReadBounds.chatBytes + 10)}));
-      for (final status in [500, 400, 404]) {
-        final response = Ok<CoordinatorResponse, CoordinatorTransportFailure>(rawResponse(big, statusCode: status));
-        expect(expectErr(await _fetch(_answering(response), offset: 7)), isA<CoordinatorResponseTooLarge>(), reason: '$status');
-        expect(
-          expectErr(await _postWith(_answering(response), offset: 7)),
-          isA<OrderActionOutcomeUnknown>().having((f) => f.cause, 'cause', isA<CoordinatorResponseTooLarge>()),
-          reason: '$status',
+    test(
+      'is too large as any answer, not a page too large; only a 200 is a page',
+      () async {
+        final big = utf8.encode(
+          jsonEncode({'detail': 'x' * (CoordinatorReadBounds.chatBytes + 10)}),
         );
-      }
-      final page = Ok<CoordinatorResponse, CoordinatorTransportFailure>(rawResponse(big));
-      expect(
-        expectErr(await _fetch(_answering(page), offset: 7)),
-        isA<ChatPageTooLarge>().having((f) => f.offset, 'offset', 7),
-      );
-    });
+        for (final status in [500, 400, 404]) {
+          final response = Ok<CoordinatorResponse, CoordinatorTransportFailure>(
+            rawResponse(big, statusCode: status),
+          );
+          expect(
+            expectErr(await _fetch(_answering(response), offset: 7)),
+            isA<CoordinatorResponseTooLarge>(),
+            reason: '$status',
+          );
+          expect(
+            expectErr(await _postWith(_answering(response), offset: 7)),
+            isA<OrderActionOutcomeUnknown>().having(
+              (f) => f.cause,
+              'cause',
+              isA<CoordinatorResponseTooLarge>(),
+            ),
+            reason: '$status',
+          );
+        }
+        final page = Ok<CoordinatorResponse, CoordinatorTransportFailure>(
+          rawResponse(big),
+        );
+        expect(
+          expectErr(await _fetch(_answering(page), offset: 7)),
+          isA<ChatPageTooLarge>().having((f) => f.offset, 'offset', 7),
+        );
+      },
+    );
   });
 
   group('malformed answers', () {
@@ -1042,9 +1059,16 @@ void main() {
     test(
       'a message over 65,536 characters is dropped unread and stated, at the bound it is given',
       () async {
-        const begin = '-----BEGIN PGP MESSAGE-----';
-        final atBound = begin + 'A' * (ChatMessage.maxReadChars - begin.length);
-        final over = '${atBound}A';
+        // An armor that decodes (its packets are not read here), padded with trailing spaces, which the armor reader drops, to exactly the bound.
+        var size = 48000;
+        while (armorEncode(ArmorBlock.message, List.filled(size + 1, 7)).length <= ChatMessage.maxReadChars) {
+          size++;
+        }
+        final armor = armorEncode(ArmorBlock.message, List.filled(size, 7));
+        final padding = ' ' * (ChatMessage.maxReadChars - armor.length);
+        final atBound = referenceToWire(armor.replaceFirst('\n-----END', '$padding\n-----END'));
+        expect(atBound.length, ChatMessage.maxReadChars);
+        final over = referenceToWire(armor.replaceFirst('\n-----END', '$padding \n-----END'));
         final page = _pageOk(
           await _fetch(
             _answering(
@@ -1126,27 +1150,44 @@ void main() {
       },
     );
 
-    test('a PGP message whose armor does not decode is not a PGP message, without text', () async {
-      final message = _outgoing('crc');
-      final lines = message.armored.split('\n');
-      final crcLine = lines.lastIndexWhere((line) => line.startsWith('='));
-      final badCrc = [
-        for (var k = 0; k < lines.length; k++)
-          k == crcLine ? (lines[k] == '=AAAA' ? '=BBBB' : '=AAAA') : lines[k],
-      ].join('\n');
-      for (final text in [
-        '-----BEGIN PGP MESSAGE-----\\garbage',
-        referenceToWire(badCrc),
-        referenceToWire(message.armored.replaceFirst('\n\n', '\n')),
-        referenceToWire(message.armored.replaceFirst('-----END PGP MESSAGE-----', '')),
-      ]) {
-        final page = _pageOk(
-          await _fetch(_answering(Ok(jsonResponse(_page(messages: [chatMessageJson(1, text, _peer.nickname)]))))),
-        );
-        expect(page.messages.single.content, ChatMessageContent.notPgpMessage, reason: text);
-        expect(page.messages.single.armored, isNull);
-      }
-    });
+    test(
+      'a PGP message whose armor does not decode is not a PGP message, without text',
+      () async {
+        final message = _outgoing('crc');
+        final lines = message.armored.split('\n');
+        final crcLine = lines.lastIndexWhere((line) => line.startsWith('='));
+        final badCrc = [
+          for (var k = 0; k < lines.length; k++)
+            k == crcLine ? (lines[k] == '=AAAA' ? '=BBBB' : '=AAAA') : lines[k],
+        ].join('\n');
+        for (final text in [
+          '-----BEGIN PGP MESSAGE-----\\garbage',
+          referenceToWire(badCrc),
+          referenceToWire(message.armored.replaceFirst('\n\n', '\n')),
+          referenceToWire(
+            message.armored.replaceFirst('-----END PGP MESSAGE-----', ''),
+          ),
+        ]) {
+          final page = _pageOk(
+            await _fetch(
+              _answering(
+                Ok(
+                  jsonResponse(
+                    _page(messages: [chatMessageJson(1, text, _peer.nickname)]),
+                  ),
+                ),
+              ),
+            ),
+          );
+          expect(
+            page.messages.single.content,
+            ChatMessageContent.notPgpMessage,
+            reason: text,
+          );
+          expect(page.messages.single.armored, isNull);
+        }
+      },
+    );
   });
 
   group('the order of the messages: facts, not refusals', () {
@@ -1271,20 +1312,36 @@ void main() {
       },
     );
 
-    test('over repeats: the index carried over the indexes the reference\'s numbering skips after a repeated index, and over no other gap', () async {
-      expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndexOverRepeats, 5);
-      expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndex, 2);
-      expect((await pageOf([1, 1, 1, 4])).contiguousIndexOverRepeats, 4);
-      expect((await pageOf([1, 1, 1, 5])).contiguousIndexOverRepeats, 3);
-      expect((await pageOf([1, 1, 3, 5])).contiguousIndexOverRepeats, 3);
-      expect((await pageOf([1, 3])).contiguousIndexOverRepeats, 1);
-      expect((await pageOf([1, ChatPage.maxIndex])).contiguousIndexOverRepeats, 1);
-      expect((await pageOf([1, ChatPage.maxIndex, ChatPage.maxIndex])).contiguousIndexOverRepeats, 1);
-      expect((await pageOf([2, 2, 4])).contiguousIndexOverRepeats, 0);
-      expect((await pageOf([4, 5, 5, 7], offset: 3)).contiguousIndexOverRepeats, 7);
-      expect((await pageOf([3, 1, 2])).contiguousIndexOverRepeats, 3);
-      expect((await pageOf([])).contiguousIndexOverRepeats, 0);
-    });
+    test(
+      'over repeats: the index carried over the indexes the reference\'s numbering skips after a repeated index, and over no other gap',
+      () async {
+        expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndexOverRepeats, 5);
+        expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndex, 2);
+        expect((await pageOf([1, 1, 1, 4])).contiguousIndexOverRepeats, 4);
+        expect((await pageOf([1, 1, 1, 5])).contiguousIndexOverRepeats, 3);
+        expect((await pageOf([1, 1, 3, 5])).contiguousIndexOverRepeats, 3);
+        expect((await pageOf([1, 3])).contiguousIndexOverRepeats, 1);
+        expect(
+          (await pageOf([1, ChatPage.maxIndex])).contiguousIndexOverRepeats,
+          1,
+        );
+        expect(
+          (await pageOf([
+            1,
+            ChatPage.maxIndex,
+            ChatPage.maxIndex,
+          ])).contiguousIndexOverRepeats,
+          1,
+        );
+        expect((await pageOf([2, 2, 4])).contiguousIndexOverRepeats, 0);
+        expect(
+          (await pageOf([4, 5, 5, 7], offset: 3)).contiguousIndexOverRepeats,
+          7,
+        );
+        expect((await pageOf([3, 1, 2])).contiguousIndexOverRepeats, 3);
+        expect((await pageOf([])).contiguousIndexOverRepeats, 0);
+      },
+    );
 
     test(
       'a flood of messages from the peer is read: the number of messages is not bounded',
@@ -1747,8 +1804,10 @@ void main() {
     test(
       'a received text with a backslash becomes a line feed, exactly as the reference reads it',
       () async {
-        const wire =
-            '-----BEGIN PGP MESSAGE-----\\\\abc\\def\nghi\\-----END PGP MESSAGE-----\\';
+        // A real message's one-line form with some line feeds left as they are: the reference turns every backslash into a line feed and keeps the line feeds.
+        final message = _outgoing('backslash rule');
+        var turn = 0;
+        final wire = message.wire.replaceAllMapped('\\', (_) => turn++.isEven ? '\\' : '\n');
         final page = _pageOk(
           await _fetch(
             _answering(
@@ -1760,6 +1819,7 @@ void main() {
             ),
           ),
         );
+        expect(referenceFromWire(wire), message.armored);
         expect(page.messages.single.armored, referenceFromWire(wire));
       },
     );
@@ -1981,8 +2041,20 @@ void main() {
     setUpAll(() {
       usUnlocked = _usKey.unlockedFor(_us);
       peerUnlocked = _peerKey.unlockedFor(_peer);
-      a = expectOk(peerUnlocked.encryptChatMessageToPost('IBAN A', peer: _usKey.publicKey, now: _now));
-      b = expectOk(peerUnlocked.encryptChatMessageToPost('changed: IBAN B', peer: _usKey.publicKey, now: _now));
+      a = expectOk(
+        peerUnlocked.encryptChatMessageToPost(
+          'IBAN A',
+          peer: _usKey.publicKey,
+          now: _now,
+        ),
+      );
+      b = expectOk(
+        peerUnlocked.encryptChatMessageToPost(
+          'changed: IBAN B',
+          peer: _usKey.publicKey,
+          now: _now,
+        ),
+      );
     });
 
     /// The five armors of the same packets the security review sent (its probe Q2): each decodes to exactly the packets of [armored].
@@ -1994,8 +2066,12 @@ void main() {
           body.substring(s, min(s + 64, body.length)),
       ].join('\n');
       return {
-        'an armor header': armored.replaceFirst('-----BEGIN PGP MESSAGE-----\n', '-----BEGIN PGP MESSAGE-----\nComment: hi\n'),
-        'lines of 64': '${lines[0]}\n\n$wrapped\n${lines[lines.length - 2]}\n${lines.last}\n',
+        'an armor header': armored.replaceFirst(
+          '-----BEGIN PGP MESSAGE-----\n',
+          '-----BEGIN PGP MESSAGE-----\nComment: hi\n',
+        ),
+        'lines of 64':
+            '${lines[0]}\n\n$wrapped\n${lines[lines.length - 2]}\n${lines.last}\n',
         'trailing spaces': armored.replaceAll('\n', ' \n'),
         'no CRC line': armored.replaceFirst(RegExp(r'\n=[^\n]{4}\n'), '\n'),
         'no final line feed': armored.trimRight(),
@@ -2007,14 +2083,28 @@ void main() {
       final bytes = armorDecode(ArmorBlock.message, armored);
       if (bytes == null) throw StateError('armor');
       final out = <int>[];
-      for (final packet in decodePackets(bytes, maxPackets: 16, streamLengths: true)) {
+      for (final packet in decodePackets(
+        bytes,
+        maxPackets: 16,
+        streamLengths: true,
+      )) {
         final body = packet.body;
-        if (packet.tag == PacketTag.integrityProtectedData && body.length > 64) {
+        if (packet.tag == PacketTag.integrityProtectedData &&
+            body.length > 64) {
           out
             ..addAll([0xc0 | packet.tag, 0xe0 | 6, ...body.sublist(0, 64)])
-            ..addAll([0xff, ...u32Bytes(body.length - 64), ...body.sublist(64)]);
+            ..addAll([
+              0xff,
+              ...u32Bytes(body.length - 64),
+              ...body.sublist(64),
+            ]);
         } else {
-          out.addAll([0xc0 | packet.tag, 0xff, ...u32Bytes(body.length), ...body]);
+          out.addAll([
+            0xc0 | packet.tag,
+            0xff,
+            ...u32Bytes(body.length),
+            ...body,
+          ]);
         }
       }
       return armorEncode(ArmorBlock.message, out);
@@ -2023,77 +2113,188 @@ void main() {
     Future<ChatPage> pageOf(List<String> wires) async => _pageOk(
       await _fetch(
         _answering(
-          Ok(jsonResponse(_page(messages: [for (var i = 0; i < wires.length; i++) chatMessageJson(i + 1, wires[i], _peer.nickname)]))),
+          Ok(
+            jsonResponse(
+              _page(
+                messages: [
+                  for (var i = 0; i < wires.length; i++)
+                    chatMessageJson(i + 1, wires[i], _peer.nickname),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
 
     DecryptedChatMessage open(ChatMessage message) => expectOk(
-      usUnlocked.decryptChatMessage(message.armored ?? '', sender: _peerKey.publicKey, now: _now),
+      usUnlocked.decryptChatMessage(
+        message.armored ?? '',
+        sender: _peerKey.publicKey,
+        now: _now,
+      ),
     );
 
-    test('each of the five armors is kept in canonical armor, so the page says the message is repeated', () async {
-      for (final MapEntry(key: label, value: variant) in rearmored(a.armored).entries) {
-        expect(armorDecode(ArmorBlock.message, variant), armorDecode(ArmorBlock.message, a.armored), reason: label);
-        final page = await pageOf([a.wire, b.wire, referenceToWire(variant)]);
-        expect(page.messages[2].content, ChatMessageContent.pgpMessage, reason: label);
-        expect(page.messages[2].armored, a.armored, reason: label);
-        expect(page.repeatsACiphertext, isTrue, reason: label);
-        expect(page.inIndexOrder && page.isContiguous && !page.repeatsAnIndex, isTrue);
-        expect(open(page.messages[2]).signatureKey, open(page.messages[0]).signatureKey);
-      }
-    });
+    test(
+      'each of the five armors is kept in canonical armor, so the page says the message is repeated',
+      () async {
+        for (final MapEntry(key: label, value: variant) in rearmored(
+          a.armored,
+        ).entries) {
+          expect(
+            armorDecode(ArmorBlock.message, variant),
+            armorDecode(ArmorBlock.message, a.armored),
+            reason: label,
+          );
+          final page = await pageOf([a.wire, b.wire, referenceToWire(variant)]);
+          expect(
+            page.messages[2].content,
+            ChatMessageContent.pgpMessage,
+            reason: label,
+          );
+          expect(page.messages[2].armored, a.armored, reason: label);
+          expect(page.repeatsACiphertext, isTrue, reason: label);
+          expect(
+            page.inIndexOrder && page.isContiguous && !page.repeatsAnIndex,
+            isTrue,
+          );
+          expect(
+            open(page.messages[2]).signatureKey,
+            open(page.messages[0]).signatureKey,
+          );
+        }
+      },
+    );
 
-    test('no armor header text the coordinator chose travels in a message', () async {
-      final page = await pageOf([referenceToWire(rearmored(a.armored)['an armor header'] ?? '')]);
-      expect(page.messages.single.armored, isNot(contains('Comment')));
-    });
+    test(
+      'no armor header text the coordinator chose travels in a message',
+      () async {
+        final page = await pageOf([
+          referenceToWire(rearmored(a.armored)['an armor header'] ?? ''),
+        ]);
+        expect(page.messages.single.armored, isNot(contains('Comment')));
+      },
+    );
 
-    test('our own message shown under another armor is still found as ours', () async {
-      final ours = _outgoing('mine');
-      for (final variant in rearmored(ours.armored).values) {
-        final page = _pageOk(
-          await _fetch(_answering(Ok(jsonResponse(_page(messages: [chatMessageJson(4, referenceToWire(variant), _us.nickname)])))), offset: 3),
+    test(
+      'our own message shown under another armor is still found as ours',
+      () async {
+        final ours = _outgoing('mine');
+        for (final variant in rearmored(ours.armored).values) {
+          final page = _pageOk(
+            await _fetch(
+              _answering(
+                Ok(
+                  jsonResponse(
+                    _page(
+                      messages: [
+                        chatMessageJson(
+                          4,
+                          referenceToWire(variant),
+                          _us.nickname,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              offset: 3,
+            ),
+          );
+          expect(page.indexOf(ours), 4);
+        }
+        final framed = _pageOk(
+          await _fetch(
+            _answering(
+              Ok(
+                jsonResponse(
+                  _page(
+                    messages: [
+                      chatMessageJson(
+                        4,
+                        referenceToWire(reframed(ours.armored)),
+                        _us.nickname,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            offset: 3,
+          ),
         );
-        expect(page.indexOf(ours), 4);
-      }
-      final framed = _pageOk(
-        await _fetch(_answering(Ok(jsonResponse(_page(messages: [chatMessageJson(4, referenceToWire(reframed(ours.armored)), _us.nickname)])))), offset: 3),
-      );
-      expect(framed.indexOf(ours), isNull, reason: 'framed again: not confirmed, as any message not found');
-    });
+        expect(
+          framed.indexOf(ours),
+          isNull,
+          reason: 'framed again: not confirmed, as any message not found',
+        );
+      },
+    );
 
-    test('a message with its packets framed again passes the page, and the decrypted signature key tells it', () async {
-      final again = reframed(a.armored);
-      expect(again, isNot(a.armored));
-      final page = await pageOf([a.wire, b.wire, referenceToWire(again)]);
-      expect(page.messages[2].content, ChatMessageContent.pgpMessage);
-      expect(page.repeatsACiphertext, isFalse);
-      final first = open(page.messages[0]);
-      final replay = open(page.messages[2]);
-      expect(replay.text, 'IBAN A');
-      expect(replay.validSignature, isTrue);
-      expect(replay.signatureKey, isNotNull);
-      expect(replay.signatureKey, first.signatureKey);
-      expect(replay.signatureKey.hashCode, first.signatureKey.hashCode);
-      expect({first.signatureKey, replay.signatureKey}, hasLength(1));
-      expect(open(page.messages[1]).signatureKey, isNot(first.signatureKey));
-    });
+    test(
+      'a message with its packets framed again passes the page, and the decrypted signature key tells it',
+      () async {
+        final again = reframed(a.armored);
+        expect(again, isNot(a.armored));
+        final page = await pageOf([a.wire, b.wire, referenceToWire(again)]);
+        expect(page.messages[2].content, ChatMessageContent.pgpMessage);
+        expect(page.repeatsACiphertext, isFalse);
+        final first = open(page.messages[0]);
+        final replay = open(page.messages[2]);
+        expect(replay.text, 'IBAN A');
+        expect(replay.validSignature, isTrue);
+        expect(replay.signatureKey, isNotNull);
+        expect(replay.signatureKey, first.signatureKey);
+        expect(replay.signatureKey.hashCode, first.signatureKey.hashCode);
+        expect({first.signatureKey, replay.signatureKey}, hasLength(1));
+        expect(open(page.messages[1]).signatureKey, isNot(first.signatureKey));
+      },
+    );
 
-    test('the same text signed again is another message; a message whose signature does not verify has no key; the key prints nothing', () async {
-      final again = expectOk(peerUnlocked.encryptChatMessageToPost('IBAN A', peer: _usKey.publicKey, now: _now.add(const Duration(seconds: 1))));
-      final page = await pageOf([a.wire, again.wire]);
-      expect(open(page.messages[1]).signatureKey, isNot(open(page.messages[0]).signatureKey));
-      final unverified = expectOk(usUnlocked.decryptChatMessage(page.messages[0].armored ?? '', sender: _strangerKey.publicKey, now: _now));
-      expect(unverified.validSignature, isFalse);
-      expect(unverified.signatureKey, isNull);
-      final key = open(page.messages[0]).signatureKey;
-      expect('$key', 'ChatSignatureKey(<redacted>)');
-      // The signer is part of the key: the same message checked as its sender's and as this robot's own differs.
-      final ours = expectOk(usUnlocked.encryptChatMessageToPost('IBAN A', peer: _peerKey.publicKey, now: _now));
-      final mine = expectOk(usUnlocked.decryptChatMessage(ours.armored, sender: _usKey.publicKey, now: _now));
-      expect(mine.signatureKey, isNot(key));
-    });
+    test(
+      'the same text signed again is another message; a message whose signature does not verify has no key; the key prints nothing',
+      () async {
+        final again = expectOk(
+          peerUnlocked.encryptChatMessageToPost(
+            'IBAN A',
+            peer: _usKey.publicKey,
+            now: _now.add(const Duration(seconds: 1)),
+          ),
+        );
+        final page = await pageOf([a.wire, again.wire]);
+        expect(
+          open(page.messages[1]).signatureKey,
+          isNot(open(page.messages[0]).signatureKey),
+        );
+        final unverified = expectOk(
+          usUnlocked.decryptChatMessage(
+            page.messages[0].armored ?? '',
+            sender: _strangerKey.publicKey,
+            now: _now,
+          ),
+        );
+        expect(unverified.validSignature, isFalse);
+        expect(unverified.signatureKey, isNull);
+        final key = open(page.messages[0]).signatureKey;
+        expect('$key', 'ChatSignatureKey(<redacted>)');
+        // The signer is part of the key: the same message checked as its sender's and as this robot's own differs.
+        final ours = expectOk(
+          usUnlocked.encryptChatMessageToPost(
+            'IBAN A',
+            peer: _peerKey.publicKey,
+            now: _now,
+          ),
+        );
+        final mine = expectOk(
+          usUnlocked.decryptChatMessage(
+            ours.armored,
+            sender: _usKey.publicKey,
+            now: _now,
+          ),
+        );
+        expect(mine.signatureKey, isNot(key));
+      },
+    );
   });
 
   group('a whole exchange through a coordinator that behaves as the reference', () {
