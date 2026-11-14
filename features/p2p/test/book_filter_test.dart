@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:p2p/generated/l10n/p2p_localizations.dart';
 import 'package:p2p/src/domain/book_filter.dart';
+import 'package:p2p/src/domain/option_search.dart';
 import 'package:p2p/src/presentation/book_filter_text.dart';
 import 'package:robosats/robosats.dart';
 
@@ -218,6 +219,182 @@ void main() {
         ],
         [1, 2, 3, 4, 5, 6, 7, 8],
       );
+    });
+  });
+
+  // #118: how many orders each method would keep alone, by the filter's own rule, and the order of the sheet.
+  group('the counts of the payment method sheet', () {
+    test('a method counts the orders the filter would keep with it alone', () {
+      final counts = BookFilter().paymentMethodCounts(book, [
+        'Revolut',
+        'Instant SEPA',
+        'SEPA',
+        'Wise',
+        'Cash F2F',
+        'On-Chain BTC',
+        'Advcash',
+      ]);
+      expect(counts, {
+        // Case included: order 4 is written « revolut ».
+        'Revolut': 1,
+        'Instant SEPA': 1,
+        // A name inside another's: « SEPA » counts the order of « Instant SEPA » too, as the filter keeps it.
+        'SEPA': 2,
+        'Wise': 1,
+        'Cash F2F': 1,
+        // The swaps are never in the list, so never counted.
+        'On-Chain BTC': 0,
+        'Advcash': 0,
+      });
+    });
+
+    test('the count follows the side, the currencies and the hosts', () {
+      expect(
+        BookFilter(
+          side: BookSide.sell,
+        ).paymentMethodCounts(book, ['Revolut', 'revolut']),
+        {'Revolut': 0, 'revolut': 1},
+      );
+      expect(
+        BookFilter(side: BookSide.buy).paymentMethodCounts(book, ['revolut']),
+        {'revolut': 0},
+      );
+      expect(
+        BookFilter(
+          currencies: [_eur],
+        ).paymentMethodCounts(book, ['SEPA', 'Wise']),
+        {'SEPA': 2, 'Wise': 0},
+      );
+      expect(
+        BookFilter(
+          currencies: [_eur, _usd],
+          hosts: [coordinator('lake')],
+        ).paymentMethodCounts(book, ['SEPA', 'Zelle', 'Revolut']),
+        {'SEPA': 1, 'Zelle': 1, 'Revolut': 0},
+      );
+    });
+
+    test('the methods chosen do not change the count of another', () {
+      expect(
+        BookFilter(
+          paymentMethods: ['Wise'],
+        ).paymentMethodCounts(book, ['Zelle']),
+        {'Zelle': 1},
+      );
+    });
+
+    test('every count agrees with what the filter keeps', () {
+      for (final filter in [
+        BookFilter(),
+        BookFilter(side: BookSide.buy, currencies: [_eur, _chf]),
+        BookFilter(hosts: [coordinator('temple')]),
+      ]) {
+        final counts = filter.paymentMethodCounts(book, [
+          for (final method in PaymentMethods.fiat) method.name,
+        ]);
+        for (final MapEntry(key: method, value: count) in counts.entries) {
+          expect(
+            filter.withPaymentMethods([method]).apply(book).length,
+            count,
+            reason: '$filter $method',
+          );
+        }
+      }
+    });
+
+    test(
+      'the sheet: the methods of the book by count, ties in the list order, then the others',
+      () async {
+        final orders = await parseOrders([
+          for (var id = 1; id <= 3; id++)
+            bookOrder(id: id, paymentMethod: 'Wise', makerSeed: id),
+          for (var id = 4; id <= 5; id++)
+            bookOrder(id: id, paymentMethod: 'Zelle', makerSeed: id),
+          bookOrder(id: 6, paymentMethod: 'Revolut', makerSeed: 6),
+          bookOrder(id: 7, paymentMethod: 'Bizum', makerSeed: 7),
+          bookOrder(id: 8, paymentMethod: 'revolut', makerSeed: 8),
+        ]);
+        final sheet = BookFilter().paymentMethodSheet(orders);
+        expect(sheet.chosen, isEmpty);
+        // Revolut and Bizum, one order each: in the official list's order.
+        expect(sheet.available, ['Wise', 'Zelle', 'Bizum', 'Revolut']);
+        expect(sheet.unavailable, [
+          for (final method in PaymentMethods.fiat)
+            if (!sheet.available.contains(method.name)) method.name,
+        ]);
+        expect(sheet.countOf('Wise'), 3);
+        expect(sheet.countOf('Revolut'), 1);
+        expect(sheet.countOf('Advcash'), 0);
+        expect(
+          {...sheet.chosen, ...sheet.available, ...sheet.unavailable},
+          {for (final method in PaymentMethods.fiat) method.name},
+        );
+        expect(
+          sheet.chosen.length +
+              sheet.available.length +
+              sheet.unavailable.length,
+          95,
+        );
+      },
+    );
+
+    test(
+      'the sheet: the methods chosen first, in the order chosen, zero included',
+      () async {
+        final orders = await parseOrders([
+          bookOrder(id: 1, paymentMethod: 'Wise'),
+          bookOrder(id: 2, paymentMethod: 'Zelle', makerSeed: 2),
+          bookOrder(id: 3, paymentMethod: 'Zelle', makerSeed: 3),
+        ]);
+        final sheet = BookFilter(
+          paymentMethods: ['Zelle', 'Advcash'],
+        ).paymentMethodSheet(orders);
+        expect(sheet.chosen, ['Zelle', 'Advcash']);
+        expect(sheet.available, ['Wise']);
+        expect(sheet.unavailable, isNot(contains('Advcash')));
+        expect(sheet.unavailable, isNot(contains('Zelle')));
+        expect(sheet.countOf('Zelle'), 2);
+        expect(sheet.countOf('Advcash'), 0);
+        expect(sheet.unavailable.length, 95 - 3);
+      },
+    );
+
+    test('the sheet follows the other choices', () {
+      final euros = BookFilter(currencies: [_eur]).paymentMethodSheet(book);
+      // Euros: order 1 (Revolut Instant SEPA), 4 (revolut, matching no name with its case), 6 (SEPA, no name of the list).
+      expect(euros.available, ['Instant SEPA', 'Revolut']);
+      final lake = BookFilter(
+        hosts: [coordinator('lake')],
+      ).paymentMethodSheet(book);
+      expect(lake.available, ['Zelle']);
+    });
+  });
+
+  group('the search of the sheet, as the official client\'s list filters', () {
+    test('the name contains the text anywhere, case and accents ignored', () {
+      expect(matchesOptionSearch('Revolut', 'rev'), isTrue);
+      expect(matchesOptionSearch('Revolut', 'REV'), isTrue);
+      expect(matchesOptionSearch('Revolut', 'Rév'), isTrue);
+      expect(matchesOptionSearch('Revolut', 'olu'), isTrue);
+      expect(matchesOptionSearch('Instant SEPA', 'sépa'), isTrue);
+      expect(
+        matchesOptionSearch('Paypal Friends & Family', 'friends &'),
+        isTrue,
+      );
+      expect(matchesOptionSearch('Revolut', ''), isTrue);
+      expect(matchesOptionSearch('Revolut', 'wise'), isFalse);
+      // The text as typed: MUI does not trim it by default.
+      expect(matchesOptionSearch('Revolut', ' rev'), isFalse);
+      expect(matchesOptionSearch('Revolut', 'revolut '), isFalse);
+    });
+
+    test('the folding', () {
+      expect(foldForSearch('ÀÉÎÕÜ çñ ăşž'), 'aeiou cn asz');
+      // No decomposition, as with NFD: kept.
+      expect(foldForSearch('ŁØŒß'), 'łøœß');
+      expect(foldForSearch('İ'), 'i');
+      // Already decomposed: the combining mark dropped.
+      expect(foldForSearch('e\u0301'), 'e');
     });
   });
 

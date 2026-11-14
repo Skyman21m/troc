@@ -8,6 +8,7 @@ import 'package:robosats/robosats.dart';
 
 import '../../generated/l10n/p2p_localizations.dart';
 import '../domain/book_filter.dart';
+import '../domain/option_search.dart';
 import '../domain/order_search.dart';
 import '../presentation/book_cubit.dart';
 import '../presentation/book_filter_text.dart';
@@ -362,18 +363,50 @@ class BookFilterSentence extends StatelessWidget {
           FilterChoice(
             label: texts.paymentMethods(filter),
             semanticsLabel: texts.paymentMethodsSemantics(filter),
-            onTap: () => FilterSheet.show<String>(
-              context,
-              title: l10n.p2pBookFilterSelectMethod,
-              anyLabel: l10n.p2pBookFilterAnyMethod,
-              options: [
-                for (final method in BookFilter.offeredPaymentMethods)
-                  method.name,
-              ],
-              selected: filter.paymentMethods,
-              label: (method) => method,
-              onChanged: cubit.selectPaymentMethods,
-            ),
+            onTap: () {
+              // Computed once as the sheet opens: its rows keep their places while the user ticks, and its counts are those of the book at that moment.
+              final sheet = filter.paymentMethodSheet(state.receivedOrders);
+              final counted = {...sheet.chosen, ...sheet.available};
+              String orders(String method) =>
+                  l10n.p2pBookFilterOrderCount(sheet.countOf(method));
+              unawaited(
+                FilterSheet.show<String>(
+                  context,
+                  title: l10n.p2pBookFilterSelectMethod,
+                  anyLabel: l10n.p2pBookFilterAnyMethod,
+                  options: const [],
+                  groups: [
+                    FilterSheetGroup(options: sheet.chosen),
+                    FilterSheetGroup(options: sheet.available),
+                    FilterSheetGroup(
+                      heading: l10n.p2pBookFilterMethodsWithoutOrders,
+                      options: sheet.unavailable,
+                      dimmed: true,
+                    ),
+                  ],
+                  selected: filter.paymentMethods,
+                  label: (method) => counted.contains(method)
+                      ? l10n.p2pBookFilterMethodWithCount(
+                          method,
+                          orders(method),
+                        )
+                      : method,
+                  semanticsLabel: (method) => counted.contains(method)
+                      ? l10n.p2pBookFilterMethodWithCountSemantics(
+                          method,
+                          orders(method),
+                        )
+                      : method,
+                  search: FilterSheetSearch(
+                    hint: l10n.p2pCommonSearch,
+                    clear: l10n.p2pCommonClear,
+                    noMatch: l10n.p2pBookFilterNoMethodFound,
+                    matches: matchesOptionSearch,
+                  ),
+                  onChanged: cubit.selectPaymentMethods,
+                ),
+              );
+            },
           ),
           word(l10n.p2pBookFilterHostedBy),
           FilterChoice(
