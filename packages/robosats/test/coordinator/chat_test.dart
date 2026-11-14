@@ -1035,6 +1035,8 @@ void main() {
           ' -----BEGIN PGP MESSAGE-----',
           '-----BEGIN PGP SIGNED MESSAGE-----',
           '-----begin pgp message-----',
+          ' ${_outgoing('after a space').wire}',
+          'Hi ${_outgoing('after text').wire}',
         ]) {
           final page = _pageOk(
             await _fetch(
