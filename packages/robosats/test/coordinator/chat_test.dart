@@ -759,6 +759,26 @@ void main() {
     );
   });
 
+  group('an error answer over the bound', () {
+    test('is too large as any answer, not a page too large; only a 200 is a page', () async {
+      final big = utf8.encode(jsonEncode({'detail': 'x' * (CoordinatorReadBounds.chatBytes + 10)}));
+      for (final status in [500, 400, 404]) {
+        final response = Ok<CoordinatorResponse, CoordinatorTransportFailure>(rawResponse(big, statusCode: status));
+        expect(expectErr(await _fetch(_answering(response), offset: 7)), isA<CoordinatorResponseTooLarge>(), reason: '$status');
+        expect(
+          expectErr(await _postWith(_answering(response), offset: 7)),
+          isA<OrderActionOutcomeUnknown>().having((f) => f.cause, 'cause', isA<CoordinatorResponseTooLarge>()),
+          reason: '$status',
+        );
+      }
+      final page = Ok<CoordinatorResponse, CoordinatorTransportFailure>(rawResponse(big));
+      expect(
+        expectErr(await _fetch(_answering(page), offset: 7)),
+        isA<ChatPageTooLarge>().having((f) => f.offset, 'offset', 7),
+      );
+    });
+  });
+
   group('malformed answers', () {
     final validMessage = chatMessageJson(
       1,
@@ -1250,6 +1270,21 @@ void main() {
         expect(next.messages.single.index, 3);
       },
     );
+
+    test('over repeats: the index carried over the indexes the reference\'s numbering skips after a repeated index, and over no other gap', () async {
+      expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndexOverRepeats, 5);
+      expect((await pageOf([1, 2, 2, 4, 5])).contiguousIndex, 2);
+      expect((await pageOf([1, 1, 1, 4])).contiguousIndexOverRepeats, 4);
+      expect((await pageOf([1, 1, 1, 5])).contiguousIndexOverRepeats, 3);
+      expect((await pageOf([1, 1, 3, 5])).contiguousIndexOverRepeats, 3);
+      expect((await pageOf([1, 3])).contiguousIndexOverRepeats, 1);
+      expect((await pageOf([1, ChatPage.maxIndex])).contiguousIndexOverRepeats, 1);
+      expect((await pageOf([1, ChatPage.maxIndex, ChatPage.maxIndex])).contiguousIndexOverRepeats, 1);
+      expect((await pageOf([2, 2, 4])).contiguousIndexOverRepeats, 0);
+      expect((await pageOf([4, 5, 5, 7], offset: 3)).contiguousIndexOverRepeats, 7);
+      expect((await pageOf([3, 1, 2])).contiguousIndexOverRepeats, 3);
+      expect((await pageOf([])).contiguousIndexOverRepeats, 0);
+    });
 
     test(
       'a flood of messages from the peer is read: the number of messages is not bounded',
@@ -1974,7 +2009,7 @@ void main() {
       final out = <int>[];
       for (final packet in decodePackets(bytes, maxPackets: 16, streamLengths: true)) {
         final body = packet.body;
-        if (packet.tag == PacketTag.symEncryptedIntegrityProtectedData && body.length > 64) {
+        if (packet.tag == PacketTag.integrityProtectedData && body.length > 64) {
           out
             ..addAll([0xc0 | packet.tag, 0xe0 | 6, ...body.sublist(0, 64)])
             ..addAll([0xff, ...u32Bytes(body.length - 64), ...body.sublist(64)]);
