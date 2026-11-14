@@ -371,37 +371,40 @@ class BookFilterSentence extends StatelessWidget {
                   l10n.p2pBookFilterOrderCount(sheet.countOf(method));
               unawaited(
                 FilterSheet.show<String>(
-                context,
-                title: l10n.p2pBookFilterSelectMethod,
-                anyLabel: l10n.p2pBookFilterAnyMethod,
-                options: const [],
-                groups: [
-                  FilterSheetGroup(options: sheet.chosen),
-                  FilterSheetGroup(options: sheet.available),
-                  FilterSheetGroup(
-                    heading: l10n.p2pBookFilterMethodsWithoutOrders,
-                    options: sheet.unavailable,
-                    dimmed: true,
+                  context,
+                  title: l10n.p2pBookFilterSelectMethod,
+                  anyLabel: l10n.p2pBookFilterAnyMethod,
+                  options: const [],
+                  groups: [
+                    FilterSheetGroup(options: sheet.chosen),
+                    FilterSheetGroup(options: sheet.available),
+                    FilterSheetGroup(
+                      heading: l10n.p2pBookFilterMethodsWithoutOrders,
+                      options: sheet.unavailable,
+                      dimmed: true,
+                    ),
+                  ],
+                  selected: filter.paymentMethods,
+                  label: (method) => counted.contains(method)
+                      ? l10n.p2pBookFilterMethodWithCount(
+                          method,
+                          orders(method),
+                        )
+                      : method,
+                  semanticsLabel: (method) => counted.contains(method)
+                      ? l10n.p2pBookFilterMethodWithCountSemantics(
+                          method,
+                          orders(method),
+                        )
+                      : method,
+                  search: FilterSheetSearch(
+                    hint: l10n.p2pCommonSearch,
+                    clear: l10n.p2pCommonClear,
+                    noMatch: l10n.p2pBookFilterNoMethodFound,
+                    matches: matchesOptionSearch,
                   ),
-                ],
-                selected: filter.paymentMethods,
-                label: (method) => counted.contains(method)
-                    ? l10n.p2pBookFilterMethodWithCount(method, orders(method))
-                    : method,
-                semanticsLabel: (method) => counted.contains(method)
-                    ? l10n.p2pBookFilterMethodWithCountSemantics(
-                        method,
-                        orders(method),
-                      )
-                    : method,
-                search: FilterSheetSearch(
-                  hint: l10n.p2pCommonSearch,
-                  clear: l10n.p2pCommonClear,
-                  noMatch: l10n.p2pBookFilterNoMethodFound,
-                  matches: matchesOptionSearch,
+                  onChanged: cubit.selectPaymentMethods,
                 ),
-                onChanged: cubit.selectPaymentMethods,
-              ),
               );
             },
           ),

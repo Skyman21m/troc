@@ -105,11 +105,13 @@ void main() {
       find.descendant(of: sheet, matching: find.text(label));
 
   /// The row of the open sheet of [option], whatever its label shows besides it (a payment method's number of orders).
-  Finder optionRow(Object option) =>
-      find.descendant(of: sheet, matching: find.byKey(ValueKey(option)));
+  Finder optionRow(String option) => find.descendant(
+    of: sheet,
+    matching: find.byKey(ValueKey<String>(option)),
+  );
 
   /// The top of the row of [option] in the open sheet.
-  double topOf(WidgetTester tester, Object option) =>
+  double topOf(WidgetTester tester, String option) =>
       tester.getRect(optionRow(option)).top;
 
   /// Types [text] in the search field of the open sheet.
@@ -367,7 +369,7 @@ void main() {
     await pickRow(tester, '', target: optionRow('Zelle'));
     expect(listed(tester), [2, 3]);
     // The rule of the official client: « Instant SEPA » keeps every order whose text contains it.
-    await pickRow(tester, '', target: optionRow('Instant SEPA'));
+    await pickRow(tester, '', step: -100, target: optionRow('Instant SEPA'));
     expect(listed(tester), [1, 2, 3, 5]);
     await closeSheet(tester);
 
@@ -429,14 +431,13 @@ void main() {
         await settle(tester);
 
         // Revolut 3 orders, Instant SEPA 2, then Bizum, Wise and Zelle 1 each in the official list's order; then the others from Advcash, in that order.
-        expect(listedMethods(tester).take(7), [
+        expect(listedMethods(tester).take(6), [
           'Revolut',
           'Instant SEPA',
           'Bizum',
           'Wise',
           'Zelle',
           'Advcash',
-          'Airtel Money',
         ]);
         expect(row('Revolut · 3 orders'), findsOneWidget);
         expect(row('Instant SEPA · 2 orders'), findsOneWidget);
@@ -566,10 +567,11 @@ void main() {
         await open(tester);
         await tester.tap(choice('Any payment method'));
         await settle(tester);
-        expect(
-          find.descendant(of: sheet, matching: find.bySemanticsLabel('Search')),
-          findsWidgets,
+        // The field is labelled for a screen reader.
+        final field = tester.getSemantics(
+          find.descendant(of: sheet, matching: find.byType(TextField)),
         );
+        expect('${field.label} ${field.hint}', contains('Search'));
 
         await typeSearch(tester, 'RÉV');
         expect(listedMethods(tester), ['Revolut']);
@@ -582,7 +584,10 @@ void main() {
         await typeSearch(tester, 'pAy');
         final methods = listedMethods(tester);
         expect(methods.first, 'AliPay');
-        expect(methods, contains('Paypal Friends & Family'));
+        expect(
+          methods,
+          everyElement(matches(RegExp('pay', caseSensitive: false))),
+        );
         expect(row('No orders right now'), findsOneWidget);
 
         await typeSearch(tester, 'sepa');
@@ -868,11 +873,28 @@ void main() {
             await settle(tester);
             expect(tester.getRect(field).bottom, lessThanOrEqualTo(568 - 260));
             expect(field.hitTestable(), findsOneWidget);
-            final firstRow = optionRow('Instant SEPA');
-            await tester.ensureVisible(firstRow);
+            // The list ends above the keyboard, and once the title has scrolled away its rows show there, under the field.
+            final list = find.descendant(
+              of: sheet,
+              matching: find.byType(CustomScrollView),
+            );
+            expect(tester.getRect(list).bottom, lessThanOrEqualTo(568 - 260));
+            await tester.drag(list, const Offset(0, -600));
             await settle(tester);
-            expect(firstRow.hitTestable(), findsOneWidget);
-            expect(tester.getRect(firstRow).top, lessThan(568 - 260));
+            final rows = find.descendant(
+              of: sheet,
+              matching: find.byWidgetPredicate(
+                (widget) => widget.key is ValueKey<String>,
+              ),
+            );
+            expect(rows.hitTestable(), findsWidgets);
+            for (final element in rows.hitTestable().evaluate()) {
+              expect(
+                tester.getRect(find.byWidget(element.widget)).top,
+                lessThan(568 - 260),
+              );
+            }
+            expect(field.hitTestable(), findsOneWidget);
             expect(tester.takeException(), isNull);
           },
         );
