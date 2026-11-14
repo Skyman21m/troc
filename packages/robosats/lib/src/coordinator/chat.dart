@@ -2,6 +2,7 @@ import 'package:meta/meta.dart';
 import 'package:primitives/primitives.dart';
 import 'package:robosats/src/coordinator/coordinator_order.dart';
 import 'package:robosats/src/coordinator/json_fields.dart';
+import 'package:robosats/src/pgp/armor.dart';
 import 'package:robosats/src/pgp/limits.dart';
 import 'package:robosats/src/pgp_wire.dart';
 import 'package:robosats/src/robosats_failure.dart';
@@ -79,6 +80,7 @@ final class OutgoingChatMessage {
       return const Err(PgpArmorMalformed());
     }
     final wire = pgpArmorToWire(armored);
+    // Defence in depth, unreachable: `encryptChatMessageToPost` refuses a text over [maxTextBytes] before encrypting, and such a text always fits.
     if (wire.length > maxWireChars) return const Err(PgpChatTextTooLong());
     return Ok(OutgoingChatMessage._(armored, wire, sender, peerFingerprint));
   }
@@ -102,10 +104,10 @@ enum ChatSender {
 
 /// What a message of a chat page holds.
 enum ChatMessageContent {
-  /// An armored `PGP MESSAGE` within [ChatMessage.maxReadChars], given as [ChatMessage.armored].
+  /// An armored `PGP MESSAGE` within [ChatMessage.maxReadChars] whose armor decodes, given as [ChatMessage.armored] in canonical armor.
   pgpMessage,
 
-  /// Text that does not start with `-----BEGIN PGP MESSAGE-----`: the official client ignores it (`EncryptedApiChat/index.tsx:155`), and this package drops the text, which no key protects.
+  /// Text that does not start with `-----BEGIN PGP MESSAGE-----`, which the official client ignores (`EncryptedApiChat/index.tsx:155`), or whose armor does not decode (wrong lines, invalid base64, a CRC-24 that does not match): this package drops the text, which no key protects and no decryption could read.
   notPgpMessage,
 
   /// More than [ChatMessage.maxReadChars] characters: the text is dropped unread, since nothing in the reference bounds what a peer posts.
@@ -135,8 +137,10 @@ final class ChatMessage {
   final ChatSender sender;
   final ChatMessageContent content;
 
-  /// The armored `PGP MESSAGE` with its line feeds restored ([pgpArmorFromWire]), for `UnlockedRobotPgpKey.decryptChatMessage` and for an export; `null` unless [content] is [ChatMessageContent.pgpMessage].
+  /// The `PGP MESSAGE` in canonical armor: its line feeds restored ([pgpArmorFromWire]), its packets decoded and armored again as this package and the official client armor them (60-character lines, a CRC-24 line, no armor header), whatever the armor the coordinator sent; `null` unless [content] is [ChatMessageContent.pgpMessage].
   ///
+  /// For `UnlockedRobotPgpKey.decryptChatMessage` and for an export: no header text the coordinator chose travels in it, and two texts that decode to the same packets are the same text here, whatever their headers, line wrapping, trailing spaces or CRC line.
+  /// Two encodings of the same message with other packet framings (another length encoding of the same packet bodies) stay different here: only `DecryptedChatMessage.signatureKey` tells them apart.
   /// Never log it.
   final String? armored;
 
@@ -209,7 +213,7 @@ final class ChatPeerKeyUnreadable extends ChatPeerKey {
 ///
 /// [messages] are as the coordinator sent them, in its order, none dropped: the coordinator chooses which and in which order, and the reference's own numbering is not reliable either.
 /// Its model has no `ordering` (`chat/models.py:56-58`) and its query no `order_by` (`chat/views.py:64`), and it numbers a post `count + 1` without a lock or a unique constraint (`chat/views.py:158-166`), so two posts at once can share an index and the next one skips an index.
-/// So the order, a repeated index, a gap and a repeated message are facts given to the caller ([inIndexOrder], [repeatsAnIndex], [isContiguous], [contiguousIndex], [repeatsACiphertext]), not reasons to refuse the page: key messages by index, keep the first one seen, as the official client does (`EncryptedApiChat/index.tsx:174-178`), and say when a page is not contiguous or shows a message again.
+/// So the order, a repeated index, a gap and a repeated message are facts given to the caller ([inIndexOrder], [repeatsAnIndex], [isContiguous], [contiguousIndex], [contiguousIndexOverRepeats], [repeatsACiphertext]), not reasons to refuse the page: key messages by index, keep the first one seen, as the official client does (`EncryptedApiChat/index.tsx:174-178`), and say when a page is not contiguous or shows a message again.
 /// What no honest coordinator sends refuses the whole page with [CoordinatorResponseMalformed]: a field of the wrong type, an index not above the offset or above [maxIndex], a time out of range, a nickname that no robot can have.
 /// What a peer chooses never refuses a page, so that a peer cannot stop this robot from reading the chat: the text of a message, whatever its length or form, is classified per message ([ChatMessageContent]), and the number of messages is not bounded but by the size of the body.
 /// The size is the one thing a peer can push past a bound: a page over `CoordinatorReadBounds.chatBytes` is [ChatPageTooLarge], for the caller to say so (see there).
@@ -282,11 +286,36 @@ final class ChatPage {
     }
     return reached;
   }
+  /// [contiguousIndex], carried over the indexes the reference's own numbering skips: an index that the page holds `m` times lets the `m - 1` indexes right after it be missing, since two posts at once share an index and the next post skips one (`chat/views.py:158-166`).
+  ///
+  /// The offset to poll from once a gap of that shape has held, unchanged, for several polls: a peer can cause one cheaply by posting twice at once, and polling from [contiguousIndex] would then read everything beyond it again at every poll.
+  /// Any other gap is never carried over: one message at index 2,147,483,647 does not move it.
+  int get contiguousIndexOverRepeats {
+    final counts = <int, int>{};
+    for (final message in messages) {
+      counts[message.index] = (counts[message.index] ?? 0) + 1;
+    }
+    var reached = offset;
+    var skippable = 0;
+    while (true) {
+      final count = counts[reached + 1];
+      if (count != null) {
+        reached++;
+        skippable = count - 1;
+      } else if (skippable > 0) {
+        reached++;
+        skippable--;
+      } else {
+        return reached;
+      }
+    }
+  }
 
-  /// Whether two messages of the page carry exactly the same encrypted text: one message shown again at another index, by a coordinator that replays it, or sent again by its sender after a post whose outcome was unknown.
+
+  /// Whether two messages of the page carry the same encrypted message in canonical armor ([ChatMessage.armored]): one message shown again at another index, by a coordinator that replays it, or sent again by its sender after a post whose outcome was unknown.
   ///
   /// The indexes say nothing of it: a message shown again at a new index leaves the page in order and contiguous.
-  /// Across pages, the caller compares the texts it keeps ([ChatMessage.armored]).
+  /// It catches a replay under another armor (an armor header, other line wrapping, trailing spaces, no CRC line), since the armor is canonical; it does not catch one whose packets are framed again (another length encoding of the same bodies), which only the decrypted messages' `DecryptedChatMessage.signatureKey` tells: a first, cheap check on the page, not the whole one.
   bool get repeatsACiphertext {
     final seen = <String>{};
     for (final message in messages) {
@@ -296,9 +325,9 @@ final class ChatPage {
     return false;
   }
 
-  /// The index of the first message of the page attributed to this robot whose text is exactly [message], or `null`.
+  /// The index of the first message of the page attributed to this robot that is [message], compared in canonical armor, or `null`.
   ///
-  /// After a post whose outcome is unknown, an index found means the coordinator shows the message as stored; `null` proves nothing: it means not confirmed, never not sent, since a coordinator can leave the message out of this robot's pages and still show it to the peer, give it the peer's nickname, or change one character of it.
+  /// After a post whose outcome is unknown, an index found means the coordinator shows the message as stored, whatever armor it shows it in; `null` proves nothing: it means not confirmed, never not sent, since a coordinator can leave the message out of this robot's pages and still show it to the peer, give it the peer's nickname, frame its packets again, or change one character of it.
   int? indexOf(OutgoingChatMessage message) {
     for (final candidate in messages) {
       if (candidate.sender == ChatSender.self &&
@@ -407,12 +436,19 @@ final class ChatPage {
       return const Err(CoordinatorResponseMalformed('message'));
     }
     final ChatMessageContent content;
+    String? armored;
     if (text.length > ChatMessage.maxReadChars) {
       content = ChatMessageContent.tooLong;
     } else if (!text.startsWith(_pgpMessageBegin)) {
       content = ChatMessageContent.notPgpMessage;
     } else {
-      content = ChatMessageContent.pgpMessage;
+      final packets = armorDecode(ArmorBlock.message, pgpArmorFromWire(text));
+      if (packets == null) {
+        content = ChatMessageContent.notPgpMessage;
+      } else {
+        content = ChatMessageContent.pgpMessage;
+        armored = armorEncode(ArmorBlock.message, packets);
+      }
     }
     return Ok(
       ChatMessage._(
@@ -425,9 +461,7 @@ final class ChatPage {
             ? ChatSender.peer
             : ChatSender.unknown,
         content: content,
-        armored: content == ChatMessageContent.pgpMessage
-            ? pgpArmorFromWire(text)
-            : null,
+        armored: armored,
       ),
     );
   }

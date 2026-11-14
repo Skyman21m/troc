@@ -801,10 +801,12 @@ final class CoordinatorClient {
     Map<String, String> query,
     int maxResponseBytes, {
     ({RobotIdentity identity, String authorization})? robot,
+    bool keepOversized = false,
   }) async {
     final onion = coordinator.origins(network).onion;
     if (onion == null) return const Err(CoordinatorNotOnNetwork());
     return _send(
+      keepOversized: keepOversized,
       CoordinatorRequest(
         method: CoordinatorHttpMethod.get,
         url: Uri.parse(
@@ -824,9 +826,11 @@ final class CoordinatorClient {
   /// Hands [request] to the transport, once.
   ///
   /// With [catchErrors], an `Error` the transport throws is a [CoordinatorTransportFailed] too, instead of propagating.
+  /// With [keepOversized], an answer over the request's bound is returned as it is, for the caller to judge by its status; otherwise it is a [CoordinatorResponseTooLarge].
   Future<Result<CoordinatorResponse, CoordinatorFailure>> _send(
     CoordinatorRequest request, {
     bool catchErrors = false,
+    bool keepOversized = false,
   }) async {
     final maxResponseBytes = request.maxResponseBytes;
     final Result<CoordinatorResponse, CoordinatorTransportFailure> result;
@@ -841,7 +845,8 @@ final class CoordinatorClient {
     }
     return switch (result) {
       Err(:final failure) => Err(failure),
-      Ok(value: final response) when response.body.length > maxResponseBytes =>
+      Ok(value: final response)
+          when !keepOversized && response.body.length > maxResponseBytes =>
         const Err(CoordinatorResponseTooLarge()),
       Ok(value: final response) => Ok(response),
     };
@@ -888,7 +893,7 @@ final class CoordinatorClient {
   /// The coordinator, the network and the order come from [lastRead], which must be this robot's read, show it as the maker or the taker with a named peer, and be at one of those statuses: otherwise nothing is sent and the failure is [OrderReadElsewhere] or a [ChatRefused] with [ChatRefused.fromLastRead] ([ChatRefusal.notParticipant], [ChatRefusal.notInChat]: read the order again before telling the user); an [offset] outside 0 to [ChatPage.maxIndex] is [ChatRefusal.offsetOutOfRange].
   /// See [ChatPage] for what is read, what refuses the page and what is only stated; the peer's key is the coordinator's word: pin it for the trade.
   /// The coordinator's refusals are [ChatRefused] kinds (6000 to 6002) and the authentication's ([RobotUnknown], [RobotCredentialsRejected]), never its text; an unknown order is a `500` at the reference (`chat/views.py:51`), read as [CoordinatorUnexpectedStatus].
-  /// A page over [CoordinatorReadBounds.chatBytes] is [ChatPageTooLarge], which a peer can cause by posting enough: see there for what the caller can do.
+  /// A `200` page over [CoordinatorReadBounds.chatBytes] is [ChatPageTooLarge], which a peer can cause by posting enough (see there for what the caller can do); an error answer over it is a [CoordinatorResponseTooLarge].
   /// A `GET`, so the transport may send it again after a connection failure.
   /// Poll it through the app's robot request limiter, as every request of a robot.
   Future<Result<ChatPage, CoordinatorFailure>> fetchChat({
@@ -915,6 +920,7 @@ final class CoordinatorClient {
         identity: identity,
         authorization: identity.authorizationHeader(),
       ),
+      keepOversized: true,
     );
     return switch (_chatAnswer(_chatPageBounded(response, offset))) {
       Err(:final failure) => Err(failure),
@@ -980,6 +986,7 @@ final class CoordinatorClient {
         robot: identity.sessionKey,
       ),
       catchErrors: true,
+      keepOversized: true,
     );
     return switch (_chatAnswer(_chatPageBounded(response, offset))) {
       Err(:final failure) => Err(_afterChatPost(failure)),
@@ -1040,7 +1047,9 @@ final class CoordinatorClient {
         _ => OrderActionOutcomeUnknown(failure),
       };
 
-  /// [response], with a body over [CoordinatorReadBounds.chatBytes] as [ChatPageTooLarge] for [offset] rather than the transport's [CoordinatorResponseTooLarge].
+  /// [response] judged against [CoordinatorReadBounds.chatBytes]: a `200` over the bound is a [ChatPageTooLarge] for [offset], any other answer over it a [CoordinatorResponseTooLarge], as for every other request.
+  ///
+  /// The transport's own [CoordinatorResponseTooLarge], for an answer it stopped reading at the bound, does not say the status: it is taken as a [ChatPageTooLarge], since a peer can make a page that large and an honest coordinator's errors are a few dozen bytes; a coordinator that sends an error that large is not honest, and the caller's answer to either is the same, the chat cannot be read from [offset].
   static Result<CoordinatorResponse, CoordinatorFailure> _chatPageBounded(
     Result<CoordinatorResponse, CoordinatorFailure> response,
     int offset,
@@ -1048,6 +1057,13 @@ final class CoordinatorClient {
     Err(failure: CoordinatorResponseTooLarge()) => Err(
       ChatPageTooLarge(offset),
     ),
+    Ok(value: final answer)
+        when answer.body.length > CoordinatorReadBounds.chatBytes =>
+      Err(
+        answer.statusCode == 200
+            ? ChatPageTooLarge(offset)
+            : const CoordinatorResponseTooLarge(),
+      ),
     _ => response,
   };
 

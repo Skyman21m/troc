@@ -85,7 +85,12 @@ export 'src/robosats_failure.dart';
 export 'src/robot_hash_id.dart' show RobotHashId;
 export 'src/robot_identity.dart' show NostrKeyDerivation, RobotIdentity;
 export 'src/robot_pgp_key.dart'
-    show DecryptedChatMessage, PgpPublicKey, RobotPgpKey, UnlockedRobotPgpKey;
+    show
+        ChatSignatureKey,
+        DecryptedChatMessage,
+        PgpPublicKey,
+        RobotPgpKey,
+        UnlockedRobotPgpKey;
 export 'src/robot_token.dart' show RobotToken, TokenEntropy;
 export 'src/coordinator/chat.dart'
     show

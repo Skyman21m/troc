@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:meta/meta.dart';
 import 'package:primitives/primitives.dart';
 import 'package:robosats/src/bitcoin_address.dart';
@@ -560,20 +561,31 @@ final class UnlockedRobotPgpKey {
           signedAt != null &&
           sender._key.acceptsSignatureDates(signature, time) &&
           signature.verify(signedData, sender._key.primary.point)) {
+        final signedTime = DateTime.fromMillisecondsSinceEpoch(
+          signedAt * 1000,
+          isUtc: true,
+        );
         return Ok(
           DecryptedChatMessage._(
             text,
             validSignature: true,
-            signedAt: DateTime.fromMillisecondsSinceEpoch(
-              signedAt * 1000,
-              isUtc: true,
+            signedAt: signedTime,
+            signatureKey: ChatSignatureKey._(
+              sender.fingerprint,
+              signedTime,
+              hex.encode(sha256.convert(signedData).bytes),
             ),
           ),
         );
       }
     }
     return Ok(
-      DecryptedChatMessage._(text, validSignature: false, signedAt: null),
+      DecryptedChatMessage._(
+        text,
+        validSignature: false,
+        signedAt: null,
+        signatureKey: null,
+      ),
     );
   }
 
@@ -618,15 +630,54 @@ final class DecryptedChatMessage {
   /// `null` without a valid signature.
   final DateTime? signedAt;
 
+  /// What makes this validly signed message the message it is, whatever the coordinator did to its armor or its packet framing; `null` without a valid signature.
+  ///
+  /// Keep it in a set for the trade: the same key at two indexes, within a page or across pages, is one message shown twice.
+  final ChatSignatureKey? signatureKey;
+
   const DecryptedChatMessage._(
     this.text, {
     required this.validSignature,
     required this.signedAt,
+    required this.signatureKey,
   });
 
   @override
   String toString() =>
       'DecryptedChatMessage(<redacted>, validSignature: $validSignature)';
+}
+
+/// Identifies a validly signed chat message by what its signature covers: the signer's key, the time the signature states, and the SHA-256 of the signed data, the text as signed.
+///
+/// The same message shown again under another armor, with its packets framed again (another length encoding of the same bodies), or with the unhashed area of its signature changed, which the signature does not cover, has the same key; a message the same robot signs again, even with the same text, has another time, so another key.
+/// The signature's own bytes would not do: its unhashed subpackets and the encoding of its integers can change without breaking it.
+/// It holds a digest of the text, never the text, so that a set of them kept for a trade holds no plaintext; a short text can still be guessed from its digest by trying candidates: never log or store it either.
+/// Two keys are equal when the three parts are; [toString] shows none of them.
+@immutable
+final class ChatSignatureKey {
+  final String _signerFingerprint;
+  final DateTime _signedAt;
+  final String _signedDataDigest;
+
+  const ChatSignatureKey._(
+    this._signerFingerprint,
+    this._signedAt,
+    this._signedDataDigest,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChatSignatureKey &&
+      other._signerFingerprint == _signerFingerprint &&
+      other._signedAt == _signedAt &&
+      other._signedDataDigest == _signedDataDigest;
+
+  @override
+  int get hashCode =>
+      Object.hash(_signerFingerprint, _signedAt, _signedDataDigest);
+
+  @override
+  String toString() => 'ChatSignatureKey(<redacted>)';
 }
 
 SignatureBody? _tryParseSignature(Uint8List body) {

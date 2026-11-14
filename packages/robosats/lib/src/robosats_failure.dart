@@ -651,6 +651,8 @@ final class ChatRefused extends CoordinatorOrderFailure {
 
 /// A chat page is larger than `CoordinatorReadBounds.chatBytes` and was not read: the messages above [offset] take more than the bound.
 ///
+/// It is a `200` answer over the bound, or an answer the transport stopped reading at the bound without saying its status (taken as a page: a peer can make one that large, while an honest coordinator's errors are a few dozen bytes); any other answer over the bound is a [CoordinatorResponseTooLarge], as for every other request.
+///
 /// Nothing bounds what a peer posts (`chat/serializers.py:62-65`), so a peer can make the history too large to read from the start: the chat is then not readable from [offset], and this package has no way to read part of it, since the coordinator answers every message above an offset at once and takes no upper bound.
 /// A later offset reads only the messages above it, those of the order's `chat_last_index` and below left out: never move to it without the user's explicit choice, since the earlier messages may hold the payment details.
 /// After a post, it is the cause of an outcome unknown: the message may have been stored.
